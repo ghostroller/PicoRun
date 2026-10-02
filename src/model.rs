@@ -7,7 +7,7 @@ pub enum LaunchTarget {
     AppUserModelId(String),
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct AppEntry {
     pub name: String,
     pub target: LaunchTarget,
@@ -15,6 +15,16 @@ pub struct AppEntry {
 }
 
 impl AppEntry {
+    /// Owned heap capacity only; allocator metadata, dictionary pages and process costs are excluded.
+    pub fn heap_bytes(&self) -> usize {
+        self.name.capacity()
+            + self.keys.capacity() * std::mem::size_of::<String>()
+            + self.keys.iter().map(String::capacity).sum::<usize>()
+            + match &self.target {
+                LaunchTarget::ShellPath(path) => path.capacity(),
+                LaunchTarget::AppUserModelId(id) => id.capacity(),
+            }
+    }
     /// Alias preparation belongs to indexing, never the keystroke search path.
     pub fn new(name: impl Into<String>, target: LaunchTarget) -> Self {
         let name = name.into();

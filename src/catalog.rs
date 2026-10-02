@@ -6,7 +6,7 @@ pub trait AppSource {
     fn discover(&mut self) -> io::Result<Vec<AppEntry>>;
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone)]
 pub struct Catalog {
     entries: Vec<AppEntry>,
 }
@@ -18,6 +18,10 @@ impl Catalog {
 
     pub fn entries(&self) -> &[AppEntry] {
         &self.entries
+    }
+
+    pub fn into_entries(self) -> Vec<AppEntry> {
+        self.entries
     }
 
     /// Replace only after a complete successful refresh, preserving the previous snapshot on error.

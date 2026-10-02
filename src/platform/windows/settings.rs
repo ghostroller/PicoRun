@@ -1,0 +1,86 @@
+use super::replace_file;
+use crate::theme::ThemeMode;
+use std::{
+    fs,
+    io::{self, Read},
+    path::Path,
+};
+
+fn read(path: &Path) -> io::Result<String> {
+    // Bound malformed settings independently of file size.
+    let mut text = String::new();
+    fs::File::open(path)?.take(65).read_to_string(&mut text)?;
+    if text.len() > 64 {
+        return Err(io::Error::other("setting is too long"));
+    }
+    Ok(text)
+}
+
+pub fn load(path: &Path) -> ThemeMode {
+    read(path)
+        .ok()
+        .and_then(|s| ThemeMode::parse(&s))
+        .unwrap_or_default()
+}
+
+pub fn save(path: &Path, mode: ThemeMode) -> io::Result<()> {
+    write(path, mode.name())
+}
+
+pub fn load_english(path: &Path) -> bool {
+    read(path).is_ok_and(|text| text.trim() == "on")
+}
+
+pub fn save_english(path: &Path, enabled: bool) -> io::Result<()> {
+    write(path, if enabled { "on" } else { "off" })
+}
+
+fn write(path: &Path, value: &str) -> io::Result<()> {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    let temporary = path.with_extension("tmp");
+    fs::write(&temporary, format!("{value}\n"))?;
+    replace_file(&temporary, path)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn saved_palette_survives_replacement_and_invalid_settings_fall_back() {
+        let directory =
+            std::env::temp_dir().join(format!("picorun-theme-test-{}", std::process::id()));
+        let path = directory.join("theme.txt");
+        assert_eq!(load(&path), ThemeMode::Dark);
+        save(&path, ThemeMode::Light).unwrap();
+        assert_eq!(load(&path), ThemeMode::Light);
+        save(&path, ThemeMode::Dark).unwrap();
+        assert_eq!(load(&path), ThemeMode::Dark);
+        for invalid in [b"system".as_slice(), &[255], &[b' '; 4096]] {
+            fs::write(&path, invalid).unwrap();
+            assert_eq!(load(&path), ThemeMode::Dark);
+        }
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn english_input_is_opt_in_and_persists_without_changing_palette() {
+        let directory =
+            std::env::temp_dir().join(format!("picorun-input-test-{}", std::process::id()));
+        let input = directory.join("english-input.txt");
+        let palette = directory.join("theme.txt");
+        assert!(!load_english(&input));
+        save(&palette, ThemeMode::Light).unwrap();
+        save_english(&input, true).unwrap();
+        assert!(load_english(&input));
+        assert_eq!(load(&palette), ThemeMode::Light);
+        save_english(&input, false).unwrap();
+        assert!(!load_english(&input));
+        for invalid in [b"true".as_slice(), &[255], &[b' '; 4096]] {
+            fs::write(&input, invalid).unwrap();
+            assert!(!load_english(&input));
+        }
+        fs::remove_dir_all(directory).unwrap();
+    }
+}

@@ -15,6 +15,38 @@ pub struct Theme {
 #[derive(Debug, Clone, Copy)]
 pub struct Rgb(pub u8, pub u8, pub u8);
 
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub enum ThemeMode {
+    #[default]
+    Dark,
+    Light,
+}
+impl ThemeMode {
+    pub fn parse(value: &str) -> Option<Self> {
+        match value.trim() {
+            "dark" => Some(Self::Dark),
+            "light" => Some(Self::Light),
+            _ => None,
+        }
+    }
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Dark => "dark",
+            Self::Light => "light",
+        }
+    }
+    pub fn theme(self) -> Theme {
+        let mut theme = Theme::default();
+        if self == Self::Light {
+            theme.background = Rgb(248, 249, 251);
+            theme.foreground = Rgb(28, 32, 39);
+            theme.selection = Rgb(216, 231, 250);
+            theme.muted = Rgb(94, 101, 113);
+        }
+        theme
+    }
+}
+
 impl Default for Theme {
     fn default() -> Self {
         Self {

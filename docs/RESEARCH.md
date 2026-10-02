@@ -32,3 +32,9 @@
 
 PicoRun 当前核心是新的简单排名，不能继承旧原型的速度或等价性结论。需要测试本项目自己的完整实现；当前可运行的合成基准只测预热后 search 调用。
 
+## 2026-10-03：Flow Launcher 与 IME
+
+只读研究官方 Flow Launcher 提交 `5a7519a03327d0eef926d1d8703aa5dbfa88305a` 的 TextBox、TextChanged/KeyUp 同步、WPF KeyBinding 与可选 AlwaysStartEn 设置；借鉴标准控件处理文字、正确区分输入法按键的原则，没有导入 WPF 或 Flow 代码。PicoRun 用原生 Edit/IMM 管理组合、候选和按键直到释放的归属，真实小狼毫输入已验收。实现、固定来源链接与完整进程成本见 [IME_RESULTS.md](IME_RESULTS.md)。
+
+随后核实 AlwaysStartEn 在 Flow 通用设置中是默认关闭的 ToggleSwitch。PicoRun 按用户选择加入托盘勾选开关，保存到小文本文件，临时激活自身 UI 线程的已加载英文 HKL，隐藏时恢复。没有增加设置窗口；本机 500 项索引、各 5 个独立进程的英文/小狼毫六字母输入对照见 [ENGLISH_INPUT_RESULTS.md](ENGLISH_INPUT_RESULTS.md)。收益主要来自避开本机中文组合输入路径，不能把已加载的 IME/GPU 组件常驻或 Shell 启动峰值说成已解决。
+

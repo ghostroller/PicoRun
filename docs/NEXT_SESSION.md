@@ -1,5 +1,7 @@
 # 新会话任务
 
+此任务已于 2026-10-03 实现首个可运行的无图标原生版本、托盘、亮/暗主题、原生 IME 按键交接与默认关闭的英文输入开关。原任务文本保留如下；继续工作前先读 [ENGLISH_INPUT_RESULTS.md](ENGLISH_INPUT_RESULTS.md) 与 [IME_RESULTS.md](IME_RESULTS.md)。英文布局已降低新进程直接拼音查询时的占用，优先定位实际使用中文 IME 后的完整进程常驻与 Shell 峰值，再补其他输入法和 Windows 10 低内存实机验证，避免重复搭建已完成的窗口与系统边界。
+
 请在此 PicoRun 项目继续实现首个可用的原生 Windows 拼音应用启动器。用户已经决定独立重写，不再 fork WindMenu；目标是最差能运行 Windows 10 的机器，内存极宝贵，必须搜索并打开应用，支持全拼和首字母，以后还要能改样式。用户已明确排除 Web 界面的 ZeroLaunch-rs，不需要插件、计算器或文件搜索。
 
 先读 AGENTS.md、README.md、docs/IMPLEMENTATION.md、docs/RESEARCH.md、docs/BOOTSTRAP_RESULTS.md，然后直接实现。基础框架已有标准库 Rust 搜索、44,435 字紧凑拼音数据、控制器和主题边界，已通过 7 项测试、Clippy 和 release 构建；原生窗口、热键、真实应用发现与打开仍未实现。不要把框架误当成完整产品，也不要把旧核心性能当成本项目实测。

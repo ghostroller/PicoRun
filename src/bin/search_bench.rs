@@ -8,6 +8,17 @@ use std::{hint::black_box, path::PathBuf, time::Instant};
 fn main() {
     println!("PicoRun synthetic warm search; release build required for useful timings.");
     println!("Excludes discovery, alias generation, UI, process memory and application launch.");
+    #[cfg(windows)]
+    {
+        println!(
+            "single_cpu_affinity={}",
+            picorun::platform::windows::verification::pin_one_cpu()
+        );
+        print!(
+            "memory CSV: stage,private,ws,peak_commit,peak_ws,gdi,user,cpu_100ns\n{}",
+            picorun::platform::windows::verification::current_memory("baseline").unwrap()
+        );
+    }
     let queries = [
         "",
         "微信",
@@ -30,6 +41,7 @@ fn main() {
             "网易云音乐",
             "Music Player",
         ];
+        let build_start = Instant::now();
         let entries: Vec<_> = (0..count)
             .map(|i| {
                 AppEntry::new(
@@ -38,8 +50,21 @@ fn main() {
                 )
             })
             .collect();
+        let build_ms = build_start.elapsed().as_secs_f64() * 1000.0;
+        let heap_bytes = entries.capacity() * std::mem::size_of::<AppEntry>()
+            + entries.iter().map(AppEntry::heap_bytes).sum::<usize>();
         let mut engine = SearchEngine::default();
         let mut hits = Vec::with_capacity(MAX_RESULTS);
+        let first_start = Instant::now();
+        engine.search(&entries, "weixin", &mut hits);
+        let first_us = first_start.elapsed().as_secs_f64() * 1_000_000.0;
+        println!("index entries={count} build_ms={build_ms:.4} owned_capacity_bytes={heap_bytes} first_search_us={first_us:.3}");
+        #[cfg(windows)]
+        print!(
+            "{}",
+            picorun::platform::windows::verification::current_memory(&format!("index_{count}"))
+                .unwrap()
+        );
         for _ in 0..20 {
             for query in queries {
                 engine.search(&entries, query, &mut hits);

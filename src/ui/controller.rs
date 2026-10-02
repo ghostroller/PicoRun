@@ -61,6 +61,11 @@ impl Controller {
         &self.catalog
     }
 
+    pub fn replace_catalog(&mut self, catalog: Catalog) {
+        self.catalog = catalog;
+        self.recompute();
+    }
+
     pub fn selected_index(&self) -> Option<usize> {
         (!self.results.is_empty()).then_some(self.selected)
     }
