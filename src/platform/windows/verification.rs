@@ -1,7 +1,9 @@
 //! Native verification helpers live here to keep all Win32 unsafe at the platform boundary.
 mod english_probe;
+mod flicker_probe;
 mod icons_probe;
 mod ime_probe;
+mod input_session_probe;
 mod startup_probe;
 use super::{discovery, ffi::*, tray, wide};
 use crate::cache;
@@ -120,7 +122,6 @@ unsafe extern "system" {
     fn SetClipboardData(format: u32, handle: Handle) -> Handle;
     fn CloseClipboard() -> i32;
     fn GetGuiResources(process: Handle, flags: u32) -> u32;
-    fn GetWindowThreadProcessId(hwnd: Hwnd, pid: *mut u32) -> u32;
     fn GetDC(hwnd: Hwnd) -> Handle;
     fn ReleaseDC(hwnd: Hwnd, dc: Handle) -> i32;
     fn PrintWindow(hwnd: Hwnd, dc: Handle, flags: u32) -> i32;
@@ -141,14 +142,6 @@ unsafe extern "system" {
         source_y: i32,
         operation: u32,
     ) -> i32;
-    fn CreateDIBSection(
-        dc: Handle,
-        info: *const BitmapInfo,
-        usage: u32,
-        bits: *mut *mut c_void,
-        section: Handle,
-        offset: u32,
-    ) -> Handle;
 }
 #[repr(C)]
 struct BitmapInfo {
@@ -324,7 +317,14 @@ fn capture(hwnd: Hwnd, path: &Path, onscreen: bool) -> io::Result<()> {
         let screen = GetDC(source);
         let dc = CreateCompatibleDC(screen);
         let mut bits = null_mut();
-        let bitmap = CreateDIBSection(screen, &info, 0, &mut bits, null_mut(), 0);
+        let bitmap = CreateDIBSection(
+            screen,
+            (&info as *const BitmapInfo).cast(),
+            0,
+            &mut bits,
+            null_mut(),
+            0,
+        );
         if bitmap.is_null() || dc.is_null() {
             if !bitmap.is_null() {
                 DeleteObject(bitmap);
@@ -353,6 +353,9 @@ fn capture(hwnd: Hwnd, path: &Path, onscreen: bool) -> io::Result<()> {
         } else {
             PrintWindow(hwnd, dc, 1) != 0
         };
+        // The capture's DIB pixels are read by Rust below. Flush this thread's GDI
+        // batch before accessing that memory, as required by CreateDIBSection.
+        GdiFlush();
         let len = rect.right as usize * rect.bottom as usize * 4;
         let mut bytes = Vec::with_capacity(54 + len);
         bytes.extend_from_slice(b"BM");
@@ -467,6 +470,15 @@ pub fn run() -> io::Result<()> {
     }
     if args.first().is_some_and(|a| a == "--startup") {
         return startup_probe::run();
+    }
+    if args.first().is_some_and(|a| a == "--flicker") {
+        return flicker_probe::run(args.iter().any(|a| a == "--reference"));
+    }
+    if args.first().is_some_and(|a| a == "--input-source") {
+        return input_session_probe::source();
+    }
+    if args.first().is_some_and(|a| a == "--input-session") {
+        return input_session_probe::run();
     }
     let real = args.iter().any(|a| a == "--real");
     let baseline = args.iter().any(|a| a == "--baseline");

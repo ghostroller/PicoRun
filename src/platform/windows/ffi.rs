@@ -84,6 +84,19 @@ pub struct MonitorInfo {
     pub flags: u32,
 }
 #[repr(C)]
+#[derive(Default)]
+pub struct GuiThreadInfo {
+    pub size: u32,
+    pub flags: u32,
+    pub active: Hwnd,
+    pub focus: Hwnd,
+    pub capture: Hwnd,
+    pub menu_owner: Hwnd,
+    pub move_size: Hwnd,
+    pub caret: Hwnd,
+    pub caret_rect: Rect,
+}
+#[repr(C)]
 #[derive(Clone, Copy)]
 pub struct Guid {
     pub a: u32,
@@ -202,11 +215,22 @@ unsafe extern "system" {
     pub fn PostQuitMessage(code: i32);
     pub fn PostMessageW(hwnd: Hwnd, msg: u32, wp: usize, lp: isize) -> i32;
     pub fn SendMessageW(hwnd: Hwnd, msg: u32, wp: usize, lp: isize) -> isize;
+    pub fn SendMessageTimeoutW(
+        hwnd: Hwnd,
+        msg: u32,
+        wp: usize,
+        lp: isize,
+        flags: u32,
+        timeout_ms: u32,
+        result: *mut usize,
+    ) -> isize;
     pub fn DestroyWindow(hwnd: Hwnd) -> i32;
     pub fn ShowWindow(hwnd: Hwnd, cmd: i32) -> i32;
     pub fn IsWindowVisible(hwnd: Hwnd) -> i32;
     pub fn SetForegroundWindow(hwnd: Hwnd) -> i32;
     pub fn GetForegroundWindow() -> Hwnd;
+    pub fn GetGUIThreadInfo(thread: u32, info: *mut GuiThreadInfo) -> i32;
+    pub fn GetWindowThreadProcessId(hwnd: Hwnd, pid: *mut u32) -> u32;
     pub fn SetFocus(hwnd: Hwnd) -> Hwnd;
     pub fn SetWindowPos(
         hwnd: Hwnd,
@@ -238,6 +262,8 @@ unsafe extern "system" {
     pub fn DrawTextW(dc: Handle, text: *const u16, count: i32, rect: *mut Rect, flags: u32) -> i32;
     pub fn InvalidateRect(hwnd: Hwnd, rect: *const Rect, erase: i32) -> i32;
     pub fn UpdateWindow(hwnd: Hwnd) -> i32;
+    pub fn GetUpdateRect(hwnd: Hwnd, rect: *mut Rect, erase: i32) -> i32;
+    pub fn GetWindowRect(hwnd: Hwnd, rect: *mut Rect) -> i32;
     pub fn MonitorFromWindow(hwnd: Hwnd, flags: u32) -> Handle;
     pub fn GetMonitorInfoW(monitor: Handle, info: *mut MonitorInfo) -> i32;
     pub fn SetProcessDPIAware() -> i32;
@@ -264,6 +290,29 @@ unsafe extern "system" {
     pub fn DeleteObject(object: Handle) -> i32;
     pub fn GetObjectW(object: Handle, size: i32, buffer: *mut c_void) -> i32;
     pub fn SelectObject(dc: Handle, object: Handle) -> Handle;
+    pub fn CreateCompatibleDC(dc: Handle) -> Handle;
+    pub fn CreateCompatibleBitmap(dc: Handle, width: i32, height: i32) -> Handle;
+    pub fn GdiFlush() -> i32;
+    pub fn CreateDIBSection(
+        dc: Handle,
+        info: *const c_void,
+        usage: u32,
+        pixels: *mut *mut c_void,
+        mapping: Handle,
+        offset: u32,
+    ) -> Handle;
+    pub fn DeleteDC(dc: Handle) -> i32;
+    pub fn BitBlt(
+        destination: Handle,
+        x: i32,
+        y: i32,
+        width: i32,
+        height: i32,
+        source: Handle,
+        source_x: i32,
+        source_y: i32,
+        operation: u32,
+    ) -> i32;
     pub fn SetTextColor(dc: Handle, color: u32) -> u32;
     pub fn SetBkColor(dc: Handle, color: u32) -> u32;
     pub fn SetBkMode(dc: Handle, mode: i32) -> i32;
@@ -315,6 +364,11 @@ unsafe extern "system" {
 #[link(name = "imm32")]
 unsafe extern "system" {
     pub fn ImmGetContext(hwnd: Hwnd) -> Handle;
+    pub fn ImmGetOpenStatus(context: Handle) -> i32;
+    pub fn ImmSetOpenStatus(context: Handle, open: i32) -> i32;
+    pub fn ImmGetConversionStatus(context: Handle, conversion: *mut u32, sentence: *mut u32)
+        -> i32;
+    pub fn ImmSetConversionStatus(context: Handle, conversion: u32, sentence: u32) -> i32;
     pub fn ImmGetDefaultIMEWnd(hwnd: Hwnd) -> Hwnd;
     pub fn ImmGetVirtualKey(hwnd: Hwnd) -> u32;
     pub fn ImmSetCompositionFontW(context: Handle, font: *const LogFont) -> i32;

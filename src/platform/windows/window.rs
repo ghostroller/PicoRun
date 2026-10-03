@@ -194,7 +194,6 @@ fn request_icons() {
 fn set_icons(enabled: bool) {
     let previous = state(|s| {
         s.view.show_icons = enabled;
-        s.view.clip_aware = enabled;
         (s.icons.take(), std::mem::take(&mut s.view.icons))
     });
     // Shutdown can wait for an in-flight extraction. No mutable UI borrow survives the join,
@@ -261,6 +260,11 @@ fn show() {
     if hwnd.is_null() {
         return;
     }
+    if state(|s| s.start_english).unwrap_or(false) {
+        if let Err(error) = input_language::remember(hwnd, EDIT.get(), true) {
+            report(format!("输入模式备份失败：{error}"));
+        }
+    }
     unsafe {
         cancel_composition();
         SetWindowTextW(EDIT.get(), wide("").as_ptr());
@@ -289,14 +293,12 @@ fn show() {
                 );
             }
         }
-        // TSF can select the Edit's last layout when focus returns. Back up the thread's
-        // pre-show choice, then apply English after focus has finished changing the context.
-        let original_layout = GetKeyboardLayout(0);
+        // The backup precedes activation; apply English after TSF focuses the Edit.
         ShowWindow(hwnd, 5);
         SetForegroundWindow(hwnd);
         SetFocus(EDIT.get());
-        if state(|s| s.start_english).unwrap_or(false) {
-            if let Err(error) = input_language::begin(original_layout) {
+        if state(|s| s.start_english).unwrap_or(false) && IsWindowVisible(hwnd) != 0 {
+            if let Err(error) = input_language::begin(hwnd, EDIT.get()) {
                 report(format!("英文输入切换失败：{error}"));
             }
         }
@@ -310,11 +312,21 @@ fn hide() {
     // Restore while Edit still has its input context. Restoring after focus loss can leave
     // TSF remembering the English layout and selecting it again on the next invocation.
     if let Err(error) = input_language::restore() {
-        report(format!("输入布局恢复失败：{error}"));
+        report(format!("输入模式恢复失败：{error}"));
     }
     unsafe {
         ShowWindow(WINDOW.get(), 0);
     }
+    if let Some(renderer) = renderer() {
+        renderer.release_row_buffer();
+    }
+}
+fn close() {
+    cancel_composition();
+    if let Err(error) = input_language::restore() {
+        report(format!("输入模式恢复失败：{error}"));
+    }
+    unsafe { DestroyWindow(WINDOW.get()) };
 }
 fn is_composing() -> bool {
     if IME.get().active() {
@@ -386,6 +398,9 @@ fn activate() {
     if let Err(error) = discovery::launch(WINDOW.get(), &target) {
         state(|s| s.status = error.to_string());
         // Keep the failing query available; do not reset it via show().
+        if state(|s| s.start_english).unwrap_or(false) {
+            let _ = input_language::remember(WINDOW.get(), EDIT.get(), true);
+        }
         unsafe {
             ShowWindow(WINDOW.get(), 5);
             SetForegroundWindow(WINDOW.get());
@@ -498,12 +513,12 @@ fn toggle_english() {
     };
     cancel_composition();
     let result = if enabled && unsafe { IsWindowVisible(WINDOW.get()) != 0 } {
-        input_language::begin(unsafe { GetKeyboardLayout(0) })
+        input_language::begin(WINDOW.get(), EDIT.get())
     } else {
         input_language::restore()
     };
     if let Err(error) = result {
-        report(format!("输入布局切换失败：{error}"));
+        report(format!("输入模式切换失败：{error}"));
     }
     if settings::save_english(&path, enabled).is_err() {
         report("英文输入选项保存失败；重启后可能恢复原设置");
@@ -532,14 +547,27 @@ fn tray_command(command: u32) {
         tray::ENGLISH => toggle_english(),
         tray::ICONS => toggle_icons(),
         tray::STARTUP => toggle_startup(),
-        tray::EXIT => unsafe {
-            DestroyWindow(WINDOW.get());
-        },
+        tray::EXIT => close(),
         _ => {}
     }
 }
 unsafe extern "system" fn edit_proc(hwnd: Hwnd, msg: u32, wp: usize, lp: isize) -> isize {
+    if msg == 0xf && state(|s| s.measure_icons).unwrap_or(false) {
+        diagnostics::edit_paint();
+    }
     match msg {
+        0x7 => {
+            let result = CallWindowProcW(EDIT_PROC.get(), hwnd, msg, wp, lp);
+            if state(|s| s.start_english).unwrap_or(false)
+                && IsWindowVisible(WINDOW.get()) != 0
+                && GetForegroundWindow() == WINDOW.get()
+            {
+                if let Err(error) = input_language::begin(WINDOW.get(), hwnd) {
+                    report(format!("英文输入切换失败：{error}"));
+                }
+            }
+            return result;
+        }
         0x10d => {
             update_ime(|s| s.start());
             update_ime_font(hwnd);
@@ -566,6 +594,9 @@ unsafe extern "system" fn edit_proc(hwnd: Hwnd, msg: u32, wp: usize, lp: isize) 
         0x290 => update_ime(|s| s.claim_key(wp as u32)), // WM_IME_KEYDOWN: never a launcher command.
         0x101 | 0x291 => update_ime(|s| s.key_up(wp as u32)),
         0x8 => {
+            if let Err(error) = input_language::restore() {
+                report(format!("输入模式恢复失败：{error}"));
+            }
             let result = CallWindowProcW(EDIT_PROC.get(), hwnd, msg, wp, lp);
             IME.set(ime::State::EMPTY); // No stale state after focus loss/cancel or a missed end notification.
             post_query();
@@ -583,11 +614,15 @@ unsafe extern "system" fn edit_proc(hwnd: Hwnd, msg: u32, wp: usize, lp: isize) 
             match wp {
                 0x26 | 0x28 => {
                     sync_query();
-                    state(|s| {
+                    let changed = state(|s| {
+                        let previous = s.controller.selected_index();
                         s.controller
-                            .select_relative(if wp == 0x26 { -1 } else { 1 })
+                            .select_relative(if wp == 0x26 { -1 } else { 1 });
+                        (previous, s.controller.selected_index())
                     });
-                    repaint(false);
+                    if let (Some(renderer), Some((previous, selected))) = (renderer(), changed) {
+                        renderer.invalidate_selection(WINDOW.get(), previous, selected);
+                    }
                     return 0;
                 }
                 0x0d => {
@@ -603,7 +638,7 @@ unsafe extern "system" fn edit_proc(hwnd: Hwnd, msg: u32, wp: usize, lp: isize) 
                     return 0;
                 }
                 0x51 if GetKeyState(0x11) < 0 => {
-                    DestroyWindow(WINDOW.get());
+                    close();
                     return 0;
                 }
                 _ => {}
@@ -815,6 +850,12 @@ unsafe extern "system" fn window_proc(hwnd: Hwnd, msg: u32, wp: usize, lp: isize
             }
             return 0;
         }
+        0x318 => {
+            if let (Some(renderer), Some(view)) = (renderer(), view()) {
+                renderer.print(hwnd, wp as Handle, &view);
+            }
+            return 0;
+        }
         0x14 => return 1,
         0x201 => {
             if let Some(renderer) = renderer() {
@@ -823,20 +864,24 @@ unsafe extern "system" fn window_proc(hwnd: Hwnd, msg: u32, wp: usize, lp: isize
                     sync_query();
                     let index =
                         ((y - renderer.top()) / renderer.scale(renderer.theme.row_height)) as usize;
-                    state(|s| {
+                    let changed = state(|s| {
+                        let previous = s.controller.selected_index();
                         if index < s.controller.results().len() {
                             let old = s.controller.selected_index().unwrap_or(0);
                             s.controller.select_relative(index as isize - old as isize);
                         }
+                        (previous, s.controller.selected_index())
                     });
-                    repaint(false);
+                    if let Some((previous, selected)) = changed {
+                        renderer.invalidate_selection(hwnd, previous, selected);
+                    }
                     SetFocus(EDIT.get());
                 }
             }
             return 0;
         }
         0x10 => {
-            DestroyWindow(hwnd);
+            close();
             return 0;
         }
         0x2 => {
@@ -966,7 +1011,6 @@ pub fn run(options: Options) -> io::Result<()> {
                 renderer: initial_renderer,
                 view: View {
                     show_icons,
-                    clip_aware: show_icons,
                     ..View::default()
                 },
                 view_dirty: true,

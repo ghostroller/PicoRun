@@ -38,7 +38,21 @@ fn toggle(hwnd: Hwnd) {
     }
 }
 fn is_english(hwnd: Hwnd) -> bool {
-    layout(hwnd) as usize & 0x3ff == 9
+    if layout(hwnd) as usize & 0x3ff == 9 {
+        return true;
+    }
+    unsafe {
+        let edit = FindWindowExW(hwnd, null_mut(), wide("Edit").as_ptr(), null());
+        SendMessageW(ImmGetDefaultIMEWnd(edit), 0x283, 5, 0) == 0
+    }
+}
+fn prior_layout(hwnd: Hwnd) -> Handle {
+    let foreground = unsafe { GetForegroundWindow() };
+    if foreground.is_null() || foreground == hwnd {
+        layout(hwnd)
+    } else {
+        layout(foreground)
+    }
 }
 
 pub(super) fn features(
@@ -80,10 +94,11 @@ pub(super) fn features(
         "enabling while hidden leaves layout until show",
         checks,
     )?;
+    let mut prior = prior_layout(hwnd);
     show(hwnd);
     expect(
         is_english(hwnd),
-        "show switches own thread to installed English layout",
+        "show starts in English input mode",
         checks,
     )?;
     let menu = open_tray_menu(hwnd, pid)?;
@@ -92,13 +107,17 @@ pub(super) fn features(
         SendMessageW(hwnd, 0x1f, 0, 0);
     }
     barrier(hwnd);
+    // A menu may end the focus session; a new show backs up its actual invoker again.
+    if !is_english(hwnd) {
+        prior = prior_layout(hwnd);
+    }
     show(hwnd);
     unsafe {
         set_control_text(edit, wide("cqyh").as_ptr());
     }
     toggle(hwnd);
     expect(
-        layout(hwnd) == other && ime_probe::text(edit) == "cqyh",
+        layout(hwnd) == prior && ime_probe::text(edit) == "cqyh",
         "disable restores prior layout and preserves committed query",
         checks,
     )?;
@@ -115,15 +134,17 @@ pub(super) fn features(
     )?;
     hide(hwnd);
     expect(
-        layout(hwnd) == other,
-        "hide restores prior non-English layout",
+        layout(hwnd) == prior,
+        "hide restores actual invoking layout",
         checks,
     )?;
+    prior = prior_layout(hwnd);
     show(hwnd);
     expect(is_english(hwnd), "next show uses English again", checks)?;
     if keyboard {
         if unsafe { GetForegroundWindow() } != hwnd {
             actual_hotkey();
+            prior = prior_layout(hwnd);
             actual_hotkey();
         }
         ime_probe::type_keys(hwnd, "weixin")?;
@@ -135,12 +156,23 @@ pub(super) fn features(
         capture(hwnd, &root.join("english-query.bmp"), true)?;
     }
     choose(hwnd, other);
+    unsafe {
+        let ime = ImmGetDefaultIMEWnd(edit);
+        SendMessageW(ime, 0x283, 2, 1);
+        SendMessageW(ime, 0x283, 6, 1);
+    }
     expect(
         layout(hwnd) == other,
         "manual language switch remains available while visible",
         checks,
     )?;
     hide(hwnd);
+    expect(
+        layout(hwnd) == prior,
+        "manual switch is restored when current session ends",
+        checks,
+    )?;
+    prior = prior_layout(hwnd);
     show(hwnd);
     expect(
         is_english(hwnd),
@@ -149,18 +181,18 @@ pub(super) fn features(
     )?;
     hide(hwnd);
     expect(
-        layout(hwnd) == other,
+        layout(hwnd) == prior,
         "hide after manual switch restores original session layout",
         checks,
     )?;
     toggle(hwnd);
     show(hwnd);
     expect(
-        layout(hwnd) == other,
+        layout(hwnd) == prior,
         &format!(
             "disabled subsequent invocation keeps prior layout (actual={:#x}, expected={:#x})",
             layout(hwnd) as usize,
-            other as usize
+            prior as usize
         ),
         checks,
     )?;
@@ -177,6 +209,7 @@ pub(super) fn features(
 pub(super) fn restarted(hwnd: Hwnd, checks: &mut String) -> io::Result<()> {
     let other = alternate()?;
     choose(hwnd, other);
+    let prior = prior_layout(hwnd);
     show(hwnd);
     expect(
         is_english(hwnd),
@@ -185,7 +218,7 @@ pub(super) fn restarted(hwnd: Hwnd, checks: &mut String) -> io::Result<()> {
     )?;
     hide(hwnd);
     expect(
-        layout(hwnd) == other,
+        layout(hwnd) == prior,
         "restarted process restores prior layout on hide",
         checks,
     )?;

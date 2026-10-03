@@ -1,6 +1,13 @@
 //! Explicit --measure-icons probes. They preserve normal focus, keyboard, hotkey and painting.
 use super::*;
 thread_local! { static DRAW_P95: Cell<usize> = const { Cell::new(0) }; }
+thread_local! {
+    static ARROW_REGION: Cell<[i32; 5]> = const { Cell::new([0; 5]) };
+    static EDIT_PAINTS: Cell<usize> = const { Cell::new(0) };
+}
+pub(super) fn edit_paint() {
+    EDIT_PAINTS.set(EDIT_PAINTS.get() + 1);
+}
 pub(super) unsafe fn message(hwnd: Hwnd, msg: u32, wp: usize) -> Option<isize> {
     Some(match msg {
         0x8006 => state(|s| {
@@ -77,6 +84,58 @@ pub(super) unsafe fn message(hwnd: Hwnd, msg: u32, wp: usize) -> Option<isize> {
         0x800a => {
             hide();
             0
+        }
+        0x800b => {
+            UpdateWindow(hwnd);
+            UpdateWindow(EDIT.get());
+            EDIT_PAINTS.set(0);
+            SendMessageW(EDIT.get(), 0x100, wp, 1);
+            SendMessageW(EDIT.get(), 0x101, wp, 1);
+            let mut rect = Rect::default();
+            GetUpdateRect(hwnd, &mut rect, 0);
+            ARROW_REGION.set([
+                rect.left,
+                rect.top,
+                rect.right,
+                rect.bottom,
+                GetUpdateRect(EDIT.get(), null_mut(), 0),
+            ]);
+            UpdateWindow(hwnd);
+            UpdateWindow(EDIT.get());
+            state(|s| s.controller.selected_index())
+                .flatten()
+                .map_or(-1, |i| i as isize)
+        }
+        0x800c => {
+            if wp == 5 {
+                EDIT_PAINTS.get() as isize
+            } else if (7..=10).contains(&wp) {
+                renderer().map_or(0, |r| match wp {
+                    7 => r.dpi as isize,
+                    8 => r.scale(r.theme.row_height) as isize,
+                    9 => r.top() as isize,
+                    _ => r.scale(r.theme.width) as isize,
+                })
+            } else if wp == 6 {
+                state(|s| s.controller.selected_index())
+                    .flatten()
+                    .map_or(-1, |i| i as isize)
+            } else if wp == 12 {
+                renderer().map_or(0, |r| r.row_buffer_pixels() as isize)
+            } else {
+                *ARROW_REGION.get().get(wp).unwrap_or(&0) as isize
+            }
+        }
+        0x800d => {
+            if !(96..=384).contains(&wp) {
+                return Some(0);
+            }
+            let mut rect = Rect::default();
+            GetWindowRect(hwnd, &mut rect);
+            // A stack pointer is valid here: this diagnostic sends within the owning process.
+            SendMessageW(hwnd, 0x2e0, wp | wp << 16, &rect as *const Rect as isize);
+            UpdateWindow(hwnd);
+            1
         }
         _ => return None,
     })
