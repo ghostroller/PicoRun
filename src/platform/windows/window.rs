@@ -1,5 +1,6 @@
 use super::{
-    discovery, ffi::*, icons, ime, input_language, settings, tray, wide, Hotkey, DEFAULT_HOTKEY,
+    discovery, ffi::*, icons, ime, input_language, settings, startup, tray, wide, Hotkey,
+    DEFAULT_HOTKEY,
 };
 mod diagnostics;
 use crate::{
@@ -34,6 +35,8 @@ pub struct Options {
     pub measure_icons: bool,
     /// Test driver can hold the measurement window visible, matching the frozen prototype.
     pub hold_measurement_window: bool,
+    /// Fixed non-Run registry namespace for native verification; never an actual autorun entry.
+    pub startup_probe: Option<String>,
 }
 impl Default for Options {
     fn default() -> Self {
@@ -46,6 +49,7 @@ impl Default for Options {
             icons: None,
             measure_icons: false,
             hold_measurement_window: false,
+            startup_probe: None,
         }
     }
 }
@@ -70,6 +74,7 @@ struct Runtime {
     icon_settings: PathBuf,
     measure_icons: bool,
     hold_measurement_window: bool,
+    startup: Rc<startup::Registration>,
 }
 thread_local! {
     static STATE: RefCell<Option<Runtime>> = const { RefCell::new(None) };
@@ -504,6 +509,20 @@ fn toggle_english() {
         report("英文输入选项保存失败；重启后可能恢复原设置");
     }
 }
+fn toggle_startup() {
+    let Some(registration) = state(|s| Rc::clone(&s.startup)) else {
+        return;
+    };
+    // Registry calls and reporting run after releasing the Runtime borrow.
+    match registration.enabled().and_then(|enabled| {
+        registration.set(!enabled)?;
+        Ok(!enabled)
+    }) {
+        Ok(true) => report("已启用登录自启动（隐藏到托盘）"),
+        Ok(false) => report("已关闭登录自启动"),
+        Err(error) => report(format!("自启动设置失败：{error}")),
+    }
+}
 fn tray_command(command: u32) {
     match command {
         tray::SHOW => show(),
@@ -512,6 +531,7 @@ fn tray_command(command: u32) {
         tray::DARK => change_theme(ThemeMode::Dark),
         tray::ENGLISH => toggle_english(),
         tray::ICONS => toggle_icons(),
+        tray::STARTUP => toggle_startup(),
         tray::EXIT => unsafe {
             DestroyWindow(WINDOW.get());
         },
@@ -680,10 +700,16 @@ unsafe extern "system" fn window_proc(hwnd: Hwnd, msg: u32, wp: usize, lp: isize
                     if TRAY_MENU_OPEN.replace(true) {
                         return 0;
                     }
-                    if let Some((tray, mode, start_english, show_icons)) = state(|s| {
-                        s.tray
-                            .clone()
-                            .map(|t| (t, s.theme_mode, s.start_english, s.view.show_icons))
+                    if let Some((tray, mode, start_english, show_icons, startup)) = state(|s| {
+                        s.tray.clone().map(|t| {
+                            (
+                                t,
+                                s.theme_mode,
+                                s.start_english,
+                                s.view.show_icons,
+                                Rc::clone(&s.startup),
+                            )
+                        })
                     })
                     .flatten()
                     {
@@ -691,7 +717,14 @@ unsafe extern "system" fn window_proc(hwnd: Hwnd, msg: u32, wp: usize, lp: isize
                             x: wp as u16 as i16 as i32,
                             y: (wp >> 16) as u16 as i16 as i32,
                         };
-                        match tray.menu(mode, start_english, show_icons, point) {
+                        let startup_enabled = match startup.enabled() {
+                            Ok(enabled) => enabled,
+                            Err(error) => {
+                                report(format!("读取自启动状态失败：{error}"));
+                                false
+                            }
+                        };
+                        match tray.menu(mode, start_english, show_icons, startup_enabled, point) {
                             Ok(command) => tray_command(command),
                             Err(error) => report(error),
                         }
@@ -890,6 +923,7 @@ pub fn run(options: Options) -> io::Result<()> {
         }
         let _com = Com;
         enable_dpi();
+        let startup = Rc::new(startup::Registration::new(&options)?);
         let data = options
             .data_dir
             .map(Ok)
@@ -941,6 +975,7 @@ pub fn run(options: Options) -> io::Result<()> {
                 start_english,
                 input_settings,
                 tray: None,
+                startup,
                 roots,
                 cache: path,
                 status,

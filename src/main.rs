@@ -37,6 +37,13 @@ fn native(arguments: Vec<std::ffi::OsString>) -> std::io::Result<()> {
     while let Some(arg) = args.next() {
         match arg.to_str() {
             Some("--hidden") => options.hidden = true,
+            Some("--startup-probe") => {
+                options.startup_probe = Some(
+                    args.next()
+                        .and_then(|arg| arg.into_string().ok())
+                        .ok_or_else(|| std::io::Error::other("--startup-probe 缺少验证标识"))?,
+                );
+            }
             Some("--icons") => {
                 options.icons = Some(
                     match args.next().and_then(|s| s.into_string().ok()).as_deref() {
@@ -73,7 +80,7 @@ fn native(arguments: Vec<std::ffi::OsString>) -> std::io::Result<()> {
                     .ok_or_else(|| std::io::Error::other("--source 缺少目录"))?,
             )),
             Some("--help") => {
-                picorun::platform::windows::error_box("直接运行打开窗口。Alt+Space 呼出/隐藏，↑↓ 选择，Enter 打开，Esc 隐藏，F5 刷新，Ctrl+Q 退出。托盘右键可刷新、切换主题、英文输入、应用图标和退出。\n选项：--hidden、--theme light|dark、--icons on|off（本次启动覆盖）、--hotkey Ctrl+Alt+P、--data-dir <数据目录>、--source <应用入口目录>（可重复；替代系统目录）。");
+                picorun::platform::windows::error_box("直接运行打开窗口。Alt+Space 呼出/隐藏，↑↓ 选择，Enter 打开，Esc 隐藏，F5 刷新，Ctrl+Q 退出。托盘右键可刷新、切换主题、英文输入、应用图标、登录自启动和退出。\n选项：--hidden、--theme light|dark、--icons on|off（本次启动覆盖）、--hotkey Ctrl+Alt+P、--data-dir <数据目录>、--source <应用入口目录>（可重复；替代系统目录）。");
                 return Ok(());
             }
             _ => return Err(std::io::Error::other("未知选项；使用 --help 查看说明")),

@@ -15,6 +15,7 @@ pub(super) const DARK: u32 = 13;
 pub(super) const EXIT: u32 = 14;
 pub(super) const ENGLISH: u32 = 15;
 pub(super) const ICONS: u32 = 16;
+pub(super) const STARTUP: u32 = 17;
 
 pub struct Tray {
     hwnd: Hwnd,
@@ -101,6 +102,7 @@ impl Tray {
         mode: ThemeMode,
         start_english: bool,
         show_icons: bool,
+        startup_enabled: bool,
         mut point: Point,
     ) -> io::Result<u32> {
         let handle = unsafe { CreatePopupMenu() };
@@ -118,6 +120,7 @@ impl Tray {
                 (0, ""),
                 (ENGLISH, "呼出时使用英文输入(&E)"),
                 (ICONS, "显示应用图标(&I)"),
+                (STARTUP, "登录时启动 PicoRun(&S)"),
                 (0, ""),
                 (EXIT, "退出 PicoRun(&Q)"),
             ] {
@@ -125,7 +128,10 @@ impl Tray {
                     menu.0,
                     if id == 0 {
                         0x800
-                    } else if id == ENGLISH && start_english || id == ICONS && show_icons {
+                    } else if id == ENGLISH && start_english
+                        || id == ICONS && show_icons
+                        || id == STARTUP && startup_enabled
+                    {
                         8 // MF_CHECKED
                     } else {
                         0

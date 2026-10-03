@@ -1,5 +1,7 @@
 # 首个可用版本
 
+2026-10-04 更新：新增默认关闭的“登录时启动 PicoRun”托盘开关，只注册当前用户的 Run 值，登录命令隐藏到托盘，取消勾选删除注册。注册表、真实菜单和跨进程保存已通过；实际注销/重启登录尚未测试，见 [STARTUP_RESULTS.md](STARTUP_RESULTS.md)。
+
 2026-10-03 更新：首个原生版本、托盘、亮/暗主题、原生 IME 按键交接、持久化的英文输入开关和应用图标开关已实现；下面保留为范围与验收规格。图标默认关闭，正式开关与性能对照见 [ICON_SWITCH_RESULTS.md](ICON_SWITCH_RESULTS.md)，英文验证见 [ENGLISH_INPUT_RESULTS.md](ENGLISH_INPUT_RESULTS.md)，IME 与 Flow Launcher 参考见 [IME_RESULTS.md](IME_RESULTS.md)，此前托盘/主题见 [TRAY_THEME_RESULTS.md](TRAY_THEME_RESULTS.md)。两个开关使用现有托盘菜单；新进程直接英文查询能避开本机小狼毫组合输入的明显增量，实际中文 IME 加载后的常驻与 Shell 峰值仍需优化。Store/UWP 枚举、其他输入法、Windows 10/32 位/低内存实机仍未完成。
 
 已确定独立重写。目标是内存极度紧张的 Windows 10 机器，不要重新讨论 fork 或换到 Web UI；直接从已有框架实现。

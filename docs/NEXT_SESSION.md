@@ -1,5 +1,7 @@
 # 新会话任务
 
+2026-10-04 状态补充：正式应用已加入默认关闭的应用图标开关及其有界缓存，见 [ICON_SWITCH_RESULTS.md](ICON_SWITCH_RESULTS.md)；随后加入默认关闭的当前用户登录自启动开关，见 [STARTUP_RESULTS.md](STARTUP_RESULTS.md)。注册与真实托盘/跨进程保存通过，实际注销/重启登录尚未验证。以下原任务保留作为历史背景，不应重复实现这些已有功能。
+
 此任务已于 2026-10-03 实现首个可运行的无图标原生版本、托盘、亮/暗主题、原生 IME 按键交接与默认关闭的英文输入开关。原任务文本保留如下；继续工作前先读 [ENGLISH_INPUT_RESULTS.md](ENGLISH_INPUT_RESULTS.md) 与 [IME_RESULTS.md](IME_RESULTS.md)。英文布局已降低新进程直接拼音查询时的占用，优先定位实际使用中文 IME 后的完整进程常驻与 Shell 峰值，再补其他输入法和 Windows 10 低内存实机验证，避免重复搭建已完成的窗口与系统边界。
 
 请在此 PicoRun 项目继续实现首个可用的原生 Windows 拼音应用启动器。用户已经决定独立重写，不再 fork WindMenu；目标是最差能运行 Windows 10 的机器，内存极宝贵，必须搜索并打开应用，支持全拼和首字母，以后还要能改样式。用户已明确排除 Web 界面的 ZeroLaunch-rs，不需要插件、计算器或文件搜索。

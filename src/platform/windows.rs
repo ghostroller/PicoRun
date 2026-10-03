@@ -5,6 +5,7 @@ pub(crate) mod icons;
 mod ime;
 mod input_language;
 mod settings;
+mod startup;
 mod tray;
 pub mod verification;
 mod window;

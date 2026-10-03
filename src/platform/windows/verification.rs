@@ -2,6 +2,7 @@
 mod english_probe;
 mod icons_probe;
 mod ime_probe;
+mod startup_probe;
 use super::{discovery, ffi::*, tray, wide};
 use crate::cache;
 use std::{
@@ -463,6 +464,9 @@ pub fn run() -> io::Result<()> {
         );
         fs::write(marker, text)?;
         return Ok(());
+    }
+    if args.first().is_some_and(|a| a == "--startup") {
+        return startup_probe::run();
     }
     let real = args.iter().any(|a| a == "--real");
     let baseline = args.iter().any(|a| a == "--baseline");
