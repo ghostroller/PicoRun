@@ -1,0 +1,622 @@
+diff --git a/src/main.rs b/src/main.rs
+index 8b2ba4b..5819a64 100644
+--- a/src/main.rs
++++ b/src/main.rs
+@@ -39,0 +40,5 @@ fn native(arguments: Vec<std::ffi::OsString>) -> std::io::Result<()> {
++            Some("--icons") => options.icons = true,
++            Some("--icons-direct") => {
++                options.icons = true;
++                options.direct_icons = true;
++            }
+diff --git a/src/platform/windows/ffi.rs b/src/platform/windows/ffi.rs
+index 9f41458..94b2a01 100644
+--- a/src/platform/windows/ffi.rs
++++ b/src/platform/windows/ffi.rs
+@@ -150,0 +151,11 @@ unsafe extern "system" {
++    pub fn DrawIconEx(
++        dc: Handle,
++        x: i32,
++        y: i32,
++        icon: Handle,
++        width: i32,
++        height: i32,
++        step: u32,
++        brush: Handle,
++        flags: u32,
++    ) -> i32;
+diff --git a/src/platform/windows/icons.rs b/src/platform/windows/icons.rs
+new file mode 100644
+index 0000000..d747b03
+--- /dev/null
++++ b/src/platform/windows/icons.rs
+@@ -0,0 +1,377 @@
++//! Evaluation only: visible icons, one blocking worker, latest request, bounded LRU.
++use super::{ffi::*, wide};
++use std::{
++    cell::{Cell, RefCell},
++    io,
++    path::PathBuf,
++    ptr::null_mut,
++    sync::{
++        atomic::{AtomicBool, Ordering},
++        mpsc::{self, Receiver},
++        Arc, Condvar, Mutex,
++    },
++    thread::{self, JoinHandle},
++    time::Instant,
++};
++
++pub const READY: u32 = 0x8005;
++pub const CAPACITY: usize = 48;
++pub struct Icon(usize, bool);
++impl Icon {
++    pub fn handle(&self) -> Handle {
++        self.0 as Handle
++    }
++}
++impl Drop for Icon {
++    fn drop(&mut self) {
++        unsafe {
++            DestroyIcon(self.handle());
++        }
++    }
++}
++#[repr(C)]
++struct FileInfo {
++    icon: Handle,
++    index: i32,
++    attributes: u32,
++    display: [u16; 260],
++    kind: [u16; 80],
++}
++#[link(name = "shell32")]
++unsafe extern "system" {
++    fn ExtractIconExW(
++        path: *const u16,
++        index: i32,
++        large: *mut Handle,
++        small: *mut Handle,
++        count: u32,
++    ) -> u32;
++    fn SHGetFileInfoW(
++        path: *const u16,
++        attributes: u32,
++        info: *mut FileInfo,
++        size: u32,
++        flags: u32,
++    ) -> usize;
++}
++#[link(name = "user32")]
++unsafe extern "system" {
++    fn LoadIconW(instance: Handle, name: *const u16) -> Handle;
++    fn CopyIcon(icon: Handle) -> Handle;
++}
++fn generic() -> Option<Arc<Icon>> {
++    let icon = unsafe { CopyIcon(LoadIconW(null_mut(), 32512usize as *const u16)) };
++    if icon.is_null() {
++        None
++    } else {
++        Some(Arc::new(Icon(icon as usize, true)))
++    }
++}
++#[link(name = "kernel32")]
++unsafe extern "system" {
++    fn ExpandEnvironmentStringsW(source: *const u16, output: *mut u16, size: u32) -> u32;
++}
++fn direct(path: &std::path::Path, resource: &mut [u16], expanded: &mut [u16]) -> Option<Arc<Icon>> {
++    let path_text = wide(path);
++    if path_text.len() > resource.len() {
++        return None;
++    }
++    resource[..path_text.len()].copy_from_slice(&path_text);
++    let mut index = 0;
++    if path
++        .extension()
++        .is_some_and(|e| e.eq_ignore_ascii_case("lnk"))
++    {
++        let (link, persist) = super::discovery::shell_link().ok()?;
++        resource[0] = 0;
++        unsafe {
++            let load: unsafe extern "system" fn(*mut std::ffi::c_void, *const u16, u32) -> i32 =
++                std::mem::transmute(persist.method(5));
++            if load(persist.0, wide(path).as_ptr(), 0) < 0 {
++                return None;
++            }
++            let location: unsafe extern "system" fn(
++                *mut std::ffi::c_void,
++                *mut u16,
++                i32,
++                *mut i32,
++            ) -> i32 = std::mem::transmute(link.method(16));
++            if location(
++                link.0,
++                resource.as_mut_ptr(),
++                resource.len() as i32,
++                &mut index,
++            ) < 0
++            {
++                return None;
++            }
++            if resource[0] == 0 {
++                let target: unsafe extern "system" fn(
++                    *mut std::ffi::c_void,
++                    *mut u16,
++                    i32,
++                    *mut std::ffi::c_void,
++                    u32,
++                ) -> i32 = std::mem::transmute(link.method(3));
++                if target(
++                    link.0,
++                    resource.as_mut_ptr(),
++                    resource.len() as i32,
++                    null_mut(),
++                    4,
++                ) < 0
++                {
++                    return None;
++                }
++                index = 0;
++            }
++        }
++    }
++    let length = unsafe {
++        ExpandEnvironmentStringsW(
++            resource.as_ptr(),
++            expanded.as_mut_ptr(),
++            expanded.len() as u32,
++        )
++    };
++    if length == 0 || length as usize > expanded.len() {
++        return None;
++    }
++    let mut icon = null_mut();
++    let count = unsafe { ExtractIconExW(expanded.as_ptr(), index, &mut icon, null_mut(), 1) };
++    if icon.is_null() {
++        None
++    } else if count == 1 {
++        Some(Arc::new(Icon(icon as usize, false)))
++    } else {
++        unsafe {
++            DestroyIcon(icon);
++        };
++        None
++    }
++}
++fn load(path: &std::path::Path) -> Option<Arc<Icon>> {
++    let mut info = FileInfo {
++        icon: null_mut(),
++        index: 0,
++        attributes: 0,
++        display: [0; 260],
++        kind: [0; 80],
++    };
++    // COM initialized on worker. Returned HICON is owned and kept alive by Arc during paint.
++    let okay = unsafe {
++        SHGetFileInfoW(
++            wide(path).as_ptr(),
++            0,
++            &mut info,
++            std::mem::size_of::<FileInfo>() as u32,
++            0x100,
++        )
++    };
++    if okay == 0 || info.icon.is_null() {
++        None
++    } else {
++        Some(Arc::new(Icon(info.icon as usize, false)))
++    }
++}
++type Request = (u64, Vec<PathBuf>);
++struct Shared {
++    latest: Mutex<Option<Request>>,
++    wake: Condvar,
++    stop: AtomicBool,
++}
++pub struct Completed {
++    pub fallbacks: usize,
++    pub generation: u64,
++    pub icons: Vec<Option<Arc<Icon>>>,
++    pub hits: usize,
++    pub misses: usize,
++    pub cache: usize,
++    pub max_load_us: usize,
++    pub total_load_us: usize,
++}
++struct Worker {
++    shared: Arc<Shared>,
++    rx: Option<Receiver<Completed>>,
++    join: Option<JoinHandle<()>>,
++}
++impl Worker {
++    fn new(hwnd: Hwnd, direct_icons: bool) -> io::Result<Self> {
++        let shared = Arc::new(Shared {
++            latest: Mutex::new(None),
++            wake: Condvar::new(),
++            stop: AtomicBool::new(false),
++        });
++        let work = Arc::clone(&shared);
++        let (tx, rx) = mpsc::sync_channel(1);
++        let owner = hwnd as usize;
++        let join = thread::Builder::new()
++            .name("icon-eval".into())
++            .spawn(move || {
++                if unsafe { CoInitializeEx(null_mut(), 2) } < 0 {
++                    return;
++                }
++                let mut cache: Vec<(PathBuf, Option<Arc<Icon>>)> = Vec::with_capacity(CAPACITY);
++                let mut resource = if direct_icons {
++                    vec![0u16; 32768]
++                } else {
++                    Vec::new()
++                };
++                let mut expanded = if direct_icons {
++                    vec![0u16; 32768]
++                } else {
++                    Vec::new()
++                };
++                let (mut hits, mut misses, mut max_load_us, mut total_load_us) = (0, 0, 0, 0);
++                let mut fallbacks = 0;
++                loop {
++                    let request = {
++                        let mut next = work.latest.lock().unwrap();
++                        while next.is_none() && !work.stop.load(Ordering::Acquire) {
++                            next = work.wake.wait(next).unwrap();
++                        }
++                        if work.stop.load(Ordering::Acquire) {
++                            break;
++                        }
++                        next.take().unwrap()
++                    };
++                    let (generation, paths) = request;
++                    let mut icons = Vec::with_capacity(paths.len());
++                    for path in paths {
++                        if work.stop.load(Ordering::Acquire)
++                            || work.latest.lock().unwrap().is_some()
++                        {
++                            break;
++                        }
++                        let icon = if let Some(index) = cache.iter().position(|(p, _)| p == &path) {
++                            hits += 1;
++                            let cached = cache.remove(index);
++                            let value = cached.1.clone();
++                            cache.push(cached);
++                            value
++                        } else {
++                            misses += 1;
++                            let start = Instant::now();
++                            let value = if direct_icons {
++                                direct(&path, &mut resource, &mut expanded).or_else(generic)
++                            } else {
++                                load(&path)
++                            };
++                            fallbacks += usize::from(value.as_ref().is_some_and(|icon| icon.1));
++                            let elapsed = start.elapsed().as_micros() as usize;
++                            total_load_us += elapsed;
++                            max_load_us = max_load_us.max(elapsed);
++                            if cache.len() == CAPACITY {
++                                cache.remove(0);
++                            }
++                            cache.push((path, value.clone()));
++                            value
++                        };
++                        icons.push(icon);
++                    }
++                    let result = Completed {
++                        fallbacks,
++                        generation,
++                        icons,
++                        hits,
++                        misses,
++                        cache: cache.len(),
++                        max_load_us,
++                        total_load_us,
++                    };
++                    if tx.send(result).is_err() {
++                        break;
++                    }
++                    // No shared lock is held while calling Win32. UI consumes only matching generation.
++                    unsafe {
++                        PostMessageW(owner as Hwnd, READY, 0, 0);
++                    }
++                }
++                drop(cache); // Destroy owned icons before uninitializing worker COM.
++                unsafe {
++                    CoUninitialize();
++                }
++            })?;
++        Ok(Self {
++            shared,
++            rx: Some(rx),
++            join: Some(join),
++        })
++    }
++}
++impl Drop for Worker {
++    fn drop(&mut self) {
++        self.rx.take(); // Unblock a sender before joining, including shutdown with an unread result.
++        self.shared.stop.store(true, Ordering::Release);
++        self.shared.wake.notify_one();
++        if let Some(join) = self.join.take() {
++            let _ = join.join();
++        }
++    }
++}
++pub struct Session {
++    pub fallbacks: Cell<usize>,
++    hwnd: Hwnd,
++    direct_icons: bool,
++    paths: RefCell<Vec<PathBuf>>,
++    worker: RefCell<Option<Worker>>,
++    pub requested: Cell<u64>,
++    pub completed: Cell<u64>,
++    pub hits: Cell<usize>,
++    pub misses: Cell<usize>,
++    pub cache: Cell<usize>,
++    pub max_load_us: Cell<usize>,
++    pub total_load_us: Cell<usize>,
++}
++impl Session {
++    pub fn new(hwnd: Hwnd, direct_icons: bool) -> Self {
++        Self {
++            fallbacks: Cell::new(0),
++            hwnd,
++            direct_icons,
++            paths: RefCell::new(Vec::new()),
++            worker: RefCell::new(None),
++            requested: Cell::new(0),
++            completed: Cell::new(0),
++            hits: Cell::new(0),
++            misses: Cell::new(0),
++            cache: Cell::new(0),
++            max_load_us: Cell::new(0),
++            total_load_us: Cell::new(0),
++        }
++    }
++    pub fn request(&self, paths: Vec<PathBuf>) -> io::Result<bool> {
++        if paths == *self.paths.borrow() && self.requested.get() != 0 {
++            return Ok(false);
++        }
++        *self.paths.borrow_mut() = paths.clone();
++        let mut worker = self.worker.borrow_mut();
++        if worker.is_none() {
++            *worker = Some(Worker::new(self.hwnd, self.direct_icons)?);
++        }
++        let worker = worker.as_ref().unwrap();
++        let generation = self.requested.get() + 1;
++        self.requested.set(generation);
++        *worker.shared.latest.lock().unwrap() = Some((generation, paths));
++        worker.shared.wake.notify_one();
++        Ok(true)
++    }
++    pub fn receive(&self) -> Option<Completed> {
++        let worker = self.worker.borrow();
++        let rx = worker.as_ref()?.rx.as_ref()?;
++        let mut latest = None;
++        while let Ok(result) = rx.try_recv() {
++            self.fallbacks.set(result.fallbacks);
++            self.hits.set(result.hits);
++            self.misses.set(result.misses);
++            self.cache.set(result.cache);
++            self.max_load_us.set(result.max_load_us);
++            self.total_load_us.set(result.total_load_us);
++            if result.generation == self.requested.get() {
++                self.completed.set(result.generation);
++                latest = Some(result);
++            }
++        }
++        latest
++    }
++}
+diff --git a/src/platform/windows/window.rs b/src/platform/windows/window.rs
+index 5dd5db1..e8b9121 100644
+--- a/src/platform/windows/window.rs
++++ b/src/platform/windows/window.rs
+@@ -1 +1,3 @@
+-use super::{discovery, ffi::*, ime, input_language, settings, tray, wide, Hotkey, DEFAULT_HOTKEY};
++use super::{
++    discovery, ffi::*, icons, ime, input_language, settings, tray, wide, Hotkey, DEFAULT_HOTKEY,
++};
+@@ -19 +21 @@ use std::{
+-const CLASS: &str = "PicoRun.Native.v1";
++const CLASS: &str = "PicoRun.IconEval.v1";
+@@ -28,0 +31,2 @@ pub struct Options {
++    pub icons: bool,
++    pub direct_icons: bool,
+@@ -37,0 +42,2 @@ impl Default for Options {
++            icons: false,
++            direct_icons: false,
+@@ -57,0 +64,3 @@ struct Runtime {
++    icons: Option<Rc<icons::Session>>,
++    icon_enabled: bool,
++    direct_icons: bool,
+@@ -68,0 +78 @@ thread_local! {
++    static DRAW_P95: Cell<usize> = const { Cell::new(0) };
+@@ -112,0 +123,3 @@ fn repaint(resize: bool) {
++    if unsafe { IsWindowVisible(hwnd) } != 0 {
++        request_icons();
++    }
+@@ -128,0 +142,36 @@ fn repaint(resize: bool) {
++fn request_icons() {
++    let Some(enabled) = state(|s| s.icon_enabled) else {
++        return;
++    };
++    if !enabled {
++        return;
++    }
++    let session = state(|s| {
++        Rc::clone(
++            s.icons
++                .get_or_insert_with(|| Rc::new(icons::Session::new(WINDOW.get(), s.direct_icons))),
++        )
++    })
++    .unwrap();
++    let paths = state(|s| {
++        s.controller
++            .results()
++            .iter()
++            .filter_map(
++                |hit| match &s.controller.catalog().entries()[hit.entry_index].target {
++                    crate::model::LaunchTarget::ShellPath(path) => Some(path.clone()),
++                    _ => None,
++                },
++            )
++            .collect()
++    })
++    .unwrap();
++    let _ = view(); // Materialize strings before a completion can populate the icon snapshot.
++    match session.request(paths) {
++        Ok(true) => {
++            state(|s| s.view.icons = vec![None; s.view.rows.len()].into());
++        }
++        Ok(false) => {}
++        Err(error) => report(error),
++    }
++}
+@@ -213,0 +263 @@ fn show() {
++        request_icons();
+@@ -433,0 +484,4 @@ unsafe extern "system" fn edit_proc(hwnd: Hwnd, msg: u32, wp: usize, lp: isize)
++    // Driver controls text directly. Physical keys do not activate/hide evaluation windows.
++    if matches!(msg, 0x100 | 0x102 | 0x290 | 0x291) {
++        return 0;
++    }
+@@ -510,0 +565,79 @@ unsafe extern "system" fn window_proc(hwnd: Hwnd, msg: u32, wp: usize, lp: isize
++    if msg == 0x8009 {
++        if wp == 1 {
++            return DRAW_P95.get() as isize;
++        }
++        if let (Some(renderer), Some(view)) = (renderer(), view()) {
++            for _ in 0..20 {
++                InvalidateRect(hwnd, null(), 0);
++                renderer.paint(hwnd, &view);
++            }
++            let mut samples = Vec::with_capacity(200);
++            for _ in 0..200 {
++                let started = std::time::Instant::now();
++                InvalidateRect(hwnd, null(), 0);
++                renderer.paint(hwnd, &view);
++                samples.push(started.elapsed().as_micros() as usize);
++            }
++            samples.sort_unstable();
++            DRAW_P95.set(samples[189]);
++            return samples[99] as isize;
++        }
++        return 0;
++    }
++    if msg == 0x8007 {
++        if let Some(name) = state(|s| {
++            s.controller
++                .catalog()
++                .entries()
++                .get(wp)
++                .map(|entry| entry.name.clone())
++        })
++        .flatten()
++        {
++            cancel_composition();
++            SetWindowTextW(EDIT.get(), wide(&name).as_ptr());
++            sync_query();
++            UpdateWindow(hwnd);
++            return state(|s| isize::from(s.text == name)).unwrap_or(0);
++        }
++        return 0;
++    }
++    if msg == 0x8008 {
++        return state(|s| s.controller.catalog().entries().len()).unwrap_or(0) as isize;
++    }
++    if msg == 0x800a {
++        hide();
++        return 0;
++    }
++    // Benchmark windows stay visible while the driver/Codex has focus. Product is unchanged.
++    if msg == 0x6 {
++        return 0;
++    }
++    if msg == 0x312 {
++        return 0;
++    }
++    if msg == 0x8006 {
++        return state(|s| {
++            s.icons.as_ref().map_or(0, |i| match wp {
++                0 => usize::from(i.requested.get() == i.completed.get()),
++                1 => i.cache.get(),
++                2 => i.misses.get(),
++                3 => i.hits.get(),
++                4 => i.max_load_us.get(),
++                5 => i.total_load_us.get(),
++                6 => s.view.icons.iter().filter(|i| i.is_some()).count(),
++                7 => i.fallbacks.get(),
++                _ => 0,
++            })
++        })
++        .unwrap_or(0) as isize;
++    }
++    if msg == icons::READY {
++        if let Some(session) = state(|s| s.icons.clone()).flatten() {
++            if let Some(result) = session.receive() {
++                state(|s| s.view.icons = result.icons.into());
++                repaint(false);
++            }
++        }
++        return 0;
++    }
+@@ -689,0 +823,2 @@ unsafe extern "system" fn window_proc(hwnd: Hwnd, msg: u32, wp: usize, lp: isize
++            let icons = state(|s| s.icons.take()).flatten();
++            drop(icons);
+@@ -751 +886 @@ pub fn run(options: Options) -> io::Result<()> {
+-    let hotkey = Hotkey::parse(&options.hotkey)?;
++    let _hotkey = Hotkey::parse(&options.hotkey)?;
+@@ -753 +888 @@ pub fn run(options: Options) -> io::Result<()> {
+-        let handle = CreateMutexW(null(), 0, wide("Local\\PicoRun.Native.v1").as_ptr());
++        let handle = CreateMutexW(null(), 0, wide("Local\\PicoRun.IconEval.v1").as_ptr());
+@@ -807 +942,4 @@ pub fn run(options: Options) -> io::Result<()> {
+-                view: View::default(),
++                view: View {
++                    show_icons: options.icons,
++                    ..View::default()
++                },
+@@ -820,0 +959,3 @@ pub fn run(options: Options) -> io::Result<()> {
++                icons: None,
++                icon_enabled: options.icons,
++                direct_icons: options.direct_icons,
+@@ -873,4 +1014 @@ pub fn run(options: Options) -> io::Result<()> {
+-            if RegisterHotKey(hwnd, 1, hotkey.modifiers, hotkey.key) == 0 {
+-                return Err(io::Error::other(format!("热键 {} 注册失败（可能已被占用）。请用 --hotkey Ctrl+Alt+P 等组合重启。Windows 错误 {}", options.hotkey, GetLastError())));
+-            }
+-            HOTKEY_SET.set(true);
++            // No global hotkey is registered for isolated measurement windows.
+diff --git a/src/platform/windows.rs b/src/platform/windows.rs
+index ddd51d9..05e61d3 100644
+--- a/src/platform/windows.rs
++++ b/src/platform/windows.rs
+@@ -3,0 +4 @@ pub mod ffi;
++pub(crate) mod icons;
+diff --git a/src/ui/native.rs b/src/ui/native.rs
+index fb4e70e..7524c95 100644
+--- a/src/ui/native.rs
++++ b/src/ui/native.rs
+@@ -1,0 +2 @@
++use crate::platform::windows::icons::Icon;
+@@ -6 +7 @@ use crate::{
+-use std::{io, ptr::null, rc::Rc};
++use std::{io, ptr::null, rc::Rc, sync::Arc};
+@@ -12,0 +14,2 @@ pub struct View {
++    pub show_icons: bool,
++    pub icons: Rc<[Option<Arc<Icon>>]>,
+@@ -96,0 +100,17 @@ impl Renderer {
++                if view.show_icons {
++                    let size = self.scale(20);
++                    if let Some(Some(icon)) = view.icons.get(index) {
++                        DrawIconEx(
++                            dc,
++                            rect.left,
++                            top + (row_height - size) / 2,
++                            icon.handle(),
++                            size,
++                            size,
++                            0,
++                            std::ptr::null_mut(),
++                            3,
++                        );
++                    }
++                    rect.left += size + self.scale(8);
++                }

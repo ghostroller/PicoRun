@@ -1,0 +1,681 @@
+diff --git a/src/main.rs b/src/main.rs
+index 5819a64..1dbaa12 100644
+--- a/src/main.rs
++++ b/src/main.rs
+@@ -44,0 +45,5 @@ fn native(arguments: Vec<std::ffi::OsString>) -> std::io::Result<()> {
++            Some("--icons-cached") => {
++                options.icons = true;
++                options.direct_icons = true;
++                options.cached_icons = true;
++            }
+diff --git a/src/platform/windows/icons/resource_cache.rs b/src/platform/windows/icons/resource_cache.rs
+new file mode 100644
+index 0000000..d5119ec
+--- /dev/null
++++ b/src/platform/windows/icons/resource_cache.rs
+@@ -0,0 +1,357 @@
++//! Worker-local metadata and icon caches. Only visible requests cause file access.
++use super::{generic, Icon, CAPACITY};
++use std::{
++    cell::Cell,
++    collections::VecDeque,
++    ffi::OsString,
++    mem::size_of,
++    os::windows::ffi::OsStringExt,
++    path::{Path, PathBuf},
++    ptr::null_mut,
++    rc::Rc,
++    sync::Arc,
++    time::Instant,
++};
++
++const MAX_ENTRIES: usize = 512;
++pub const BYTE_BUDGET: usize = 128 * 1024;
++
++#[derive(Default, Clone)]
++pub struct Stats {
++    pub hits: usize,
++    pub misses: usize,
++    pub fallbacks: usize,
++    pub max_load_us: usize,
++    pub total_load_us: usize,
++    pub cache: usize,
++    pub parses: usize,
++    pub metadata_hits: usize,
++    pub metadata_entries: usize,
++    pub metadata_bytes: usize,
++    pub generic_copies: usize,
++    pub shared_resources: usize,
++    pub extracts: usize,
++    pub invalidations: usize,
++}
++
++#[derive(PartialEq, Eq)]
++struct Key {
++    path: PathBuf,
++    index: i32,
++}
++struct Resource {
++    key: Key,
++    absent: Cell<bool>,
++}
++impl Resource {
++    fn bytes(&self) -> usize {
++        size_of::<Self>() + 2 * size_of::<usize>() + self.key.path.capacity()
++    }
++}
++struct Entry {
++    path: PathBuf,
++    resource: Option<Rc<Resource>>,
++}
++impl Entry {
++    fn owned_bytes(&self) -> usize {
++        self.path.capacity() + self.resource.as_ref().map_or(0, |r| r.bytes())
++    }
++}
++
++pub struct Loader {
++    entries: VecDeque<Entry>,
++    // Fixed extraction size: all handles are ExtractIconExW large icons. Renderer is unchanged.
++    icons: Vec<(Rc<Resource>, Arc<Icon>)>,
++    generic: Option<Arc<Icon>>,
++    generic_attempted: bool,
++    resource_buffer: Vec<u16>,
++    expanded_buffer: Vec<u16>,
++    counters: Stats,
++}
++impl Loader {
++    pub fn new() -> Self {
++        Self {
++            entries: VecDeque::new(),
++            icons: Vec::with_capacity(CAPACITY),
++            generic: None,
++            generic_attempted: false,
++            resource_buffer: vec![0; 32768],
++            expanded_buffer: vec![0; 32768],
++            counters: Stats::default(),
++        }
++    }
++    fn bytes(&self) -> usize {
++        // Shared resource strings are deliberately charged for every reference: conservative
++        // retained-cache accounting including allocated container slots and Rc control blocks.
++        self.entries.capacity() * size_of::<Entry>()
++            + self.entries.iter().map(Entry::owned_bytes).sum::<usize>()
++            + self.icons.capacity() * size_of::<(Rc<Resource>, Arc<Icon>)>()
++            + self.icons.iter().map(|(r, _)| r.bytes()).sum::<usize>()
++    }
++    fn trim(&mut self) {
++        while self.entries.len() > MAX_ENTRIES || self.bytes() > BYTE_BUDGET {
++            if self.entries.pop_front().is_none() {
++                if self.icons.is_empty() {
++                    break;
++                }
++                self.icons.remove(0);
++            }
++        }
++    }
++    fn store(&mut self, path: &Path, resource: Option<Rc<Resource>>) {
++        if self.entries.len() == MAX_ENTRIES {
++            self.entries.pop_front();
++        }
++        self.entries.push_back(Entry {
++            path: path.to_path_buf(),
++            resource,
++        });
++        self.trim();
++    }
++    fn intern(&mut self, key: Key) -> Rc<Resource> {
++        let existing = self
++            .entries
++            .iter()
++            .filter_map(|e| e.resource.as_ref())
++            .chain(self.icons.iter().map(|(r, _)| r))
++            .find(|r| r.key == key);
++        if let Some(resource) = existing {
++            self.counters.shared_resources += 1;
++            Rc::clone(resource)
++        } else {
++            Rc::new(Resource {
++                key,
++                absent: Cell::new(false),
++            })
++        }
++    }
++    fn fallback(&mut self) -> Option<Arc<Icon>> {
++        self.counters.fallbacks += 1;
++        if !self.generic_attempted {
++            self.generic_attempted = true;
++            self.generic = generic();
++            self.counters.generic_copies += usize::from(self.generic.is_some());
++        }
++        self.generic.clone()
++    }
++    pub fn load(&mut self, path: &Path) -> Option<Arc<Icon>> {
++        let started = Instant::now();
++        let (resource, metadata_hit) =
++            if let Some(index) = self.entries.iter().position(|e| e.path == path) {
++                self.counters.metadata_hits += 1;
++                let entry = self.entries.remove(index).unwrap();
++                let resource = entry.resource.clone();
++                self.entries.push_back(entry);
++                (resource, true)
++            } else {
++                self.counters.parses += 1;
++                let key = resolve(path, &mut self.resource_buffer, &mut self.expanded_buffer);
++                let resource = key.map(|key| self.intern(key));
++                self.store(path, resource.clone());
++                (resource, false)
++            };
++        let Some(resource) = resource else {
++            if metadata_hit {
++                self.counters.hits += 1;
++            } else {
++                self.counters.misses += 1;
++                self.record_load(started);
++            }
++            return self.fallback();
++        };
++        if resource.absent.get() {
++            self.counters.hits += 1;
++            return self.fallback();
++        }
++        if let Some(index) = self
++            .icons
++            .iter()
++            .position(|(r, _)| Rc::ptr_eq(r, &resource))
++        {
++            self.counters.hits += 1;
++            let cached = self.icons.remove(index);
++            let icon = Arc::clone(&cached.1);
++            self.icons.push(cached);
++            return Some(icon);
++        }
++        self.counters.misses += 1;
++        self.counters.extracts += 1;
++        let icon = extract(&resource.key);
++        self.record_load(started);
++        if let Some(icon) = icon {
++            if self.icons.len() == CAPACITY {
++                self.icons.remove(0);
++            }
++            self.icons.push((resource, Arc::clone(&icon)));
++            self.trim();
++            Some(icon)
++        } else {
++            resource.absent.set(true);
++            self.fallback()
++        }
++    }
++    fn record_load(&mut self, started: Instant) {
++        let micros = started.elapsed().as_micros() as usize;
++        self.counters.total_load_us += micros;
++        self.counters.max_load_us = self.counters.max_load_us.max(micros);
++    }
++    pub fn stats(&self) -> Stats {
++        Stats {
++            cache: self.icons.len(),
++            metadata_entries: self.entries.len(),
++            metadata_bytes: self.bytes(),
++            ..self.counters.clone()
++        }
++    }
++    pub fn clear(&mut self) {
++        self.entries.clear();
++        self.icons.clear();
++        self.counters.invalidations += 1;
++    }
++}
++
++fn resolve(path: &Path, resource: &mut [u16], expanded: &mut [u16]) -> Option<Key> {
++    let path_text = super::wide(path);
++    if path_text.len() > resource.len() {
++        return None;
++    }
++    resource[..path_text.len()].copy_from_slice(&path_text);
++    let mut index = 0;
++    if path
++        .extension()
++        .is_some_and(|e| e.eq_ignore_ascii_case("lnk"))
++    {
++        let (link, persist) = super::super::discovery::shell_link().ok()?;
++        resource[0] = 0;
++        // Worker has initialized STA COM; interface owners release both pointers on every exit.
++        // Buffers outlive these synchronous calls. No UI Runtime borrow or request lock is held.
++        unsafe {
++            let load: unsafe extern "system" fn(*mut std::ffi::c_void, *const u16, u32) -> i32 =
++                std::mem::transmute(persist.method(5));
++            if load(persist.0, path_text.as_ptr(), 0) < 0 {
++                return None;
++            }
++            let location: unsafe extern "system" fn(
++                *mut std::ffi::c_void,
++                *mut u16,
++                i32,
++                *mut i32,
++            ) -> i32 = std::mem::transmute(link.method(16));
++            if location(
++                link.0,
++                resource.as_mut_ptr(),
++                resource.len() as i32,
++                &mut index,
++            ) < 0
++            {
++                return None;
++            }
++            if resource[0] == 0 {
++                let target: unsafe extern "system" fn(
++                    *mut std::ffi::c_void,
++                    *mut u16,
++                    i32,
++                    *mut std::ffi::c_void,
++                    u32,
++                ) -> i32 = std::mem::transmute(link.method(3));
++                if target(
++                    link.0,
++                    resource.as_mut_ptr(),
++                    resource.len() as i32,
++                    null_mut(),
++                    4,
++                ) < 0
++                {
++                    return None;
++                }
++                index = 0;
++            }
++        }
++    }
++    // Expand into a bounded reusable buffer before creating a stable resource cache key.
++    let length = unsafe {
++        super::ExpandEnvironmentStringsW(
++            resource.as_ptr(),
++            expanded.as_mut_ptr(),
++            expanded.len() as u32,
++        )
++    };
++    if length == 0 || length as usize > expanded.len() {
++        return None;
++    }
++    Some(Key {
++        path: PathBuf::from(OsString::from_wide(&expanded[..length as usize - 1])),
++        index,
++    })
++}
++fn extract(key: &Key) -> Option<Arc<Icon>> {
++    let path = super::wide(&key.path);
++    let mut icon = null_mut();
++    // Owned HICON is released by Icon::drop after worker cache and UI snapshots let it go.
++    let count =
++        unsafe { super::ExtractIconExW(path.as_ptr(), key.index, &mut icon, null_mut(), 1) };
++    if icon.is_null() {
++        None
++    } else if count == 1 {
++        Some(Arc::new(Icon(icon as usize, false)))
++    } else {
++        unsafe { super::DestroyIcon(icon) };
++        None
++    }
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++    fn key(index: i32) -> Key {
++        Key {
++            path: PathBuf::from("synthetic-resource.dll"),
++            index,
++        }
++    }
++    #[test]
++    fn aliases_share_negative_state_but_different_indices_do_not() {
++        let mut loader = Loader::new();
++        let first = loader.intern(key(-154));
++        first.absent.set(true);
++        loader.store(Path::new("first.lnk"), Some(first.clone()));
++        let alias = loader.intern(key(-154));
++        assert!(Rc::ptr_eq(&first, &alias));
++        assert!(alias.absent.get());
++        let different = loader.intern(key(-155));
++        assert!(!Rc::ptr_eq(&first, &different));
++        assert!(!different.absent.get());
++        loader.clear();
++        let refreshed = loader.intern(key(-154));
++        assert!(!refreshed.absent.get());
++    }
++    #[test]
++    fn repeated_negative_requests_do_not_extract_or_copy_more_icons() {
++        let mut loader = Loader::new();
++        let absent = loader.intern(key(0));
++        absent.absent.set(true);
++        loader.store(Path::new("absent.lnk"), Some(absent));
++        let first = loader.load(Path::new("absent.lnk")).unwrap();
++        for _ in 0..100 {
++            let next = loader.load(Path::new("absent.lnk")).unwrap();
++            assert!(Arc::ptr_eq(&first, &next));
++        }
++        assert_eq!(loader.stats().extracts, 0);
++        assert_eq!(loader.stats().parses, 0);
++        assert_eq!(loader.stats().generic_copies, 1);
++    }
++    #[test]
++    fn metadata_has_count_and_byte_bounds() {
++        let mut loader = Loader::new();
++        for index in 0..2000 {
++            let path = PathBuf::from(format!("{}-{index}.lnk", "x".repeat(300)));
++            loader.store(&path, None);
++            assert!(loader.stats().metadata_entries <= MAX_ENTRIES);
++            assert!(loader.stats().metadata_bytes <= BYTE_BUDGET);
++        }
++        let enormous = PathBuf::from("y".repeat(BYTE_BUDGET + 1));
++        loader.store(&enormous, None);
++        assert!(loader.stats().metadata_bytes <= BYTE_BUDGET);
++        assert!(!loader.entries.iter().any(|e| e.path == enormous));
++    }
++}
+diff --git a/src/platform/windows/icons.rs b/src/platform/windows/icons.rs
+index d747b03..28f5b8f 100644
+--- a/src/platform/windows/icons.rs
++++ b/src/platform/windows/icons.rs
+@@ -2,0 +3 @@ use super::{ffi::*, wide};
++mod resource_cache;
+@@ -181,0 +183 @@ struct Shared {
++    invalidate: AtomicBool,
+@@ -191,0 +194 @@ pub struct Completed {
++    stats: resource_cache::Stats,
+@@ -199 +202 @@ impl Worker {
+-    fn new(hwnd: Hwnd, direct_icons: bool) -> io::Result<Self> {
++    fn new(hwnd: Hwnd, direct_icons: bool, cached_icons: bool) -> io::Result<Self> {
+@@ -203,0 +207 @@ impl Worker {
++            invalidate: AtomicBool::new(false),
+@@ -215 +219,2 @@ impl Worker {
+-                let mut resource = if direct_icons {
++                let mut loader = cached_icons.then(resource_cache::Loader::new);
++                let mut resource = if direct_icons && !cached_icons {
+@@ -220 +225 @@ impl Worker {
+-                let mut expanded = if direct_icons {
++                let mut expanded = if direct_icons && !cached_icons {
+@@ -238,0 +244,6 @@ impl Worker {
++                    if work.invalidate.swap(false, Ordering::AcqRel) {
++                        cache.clear();
++                        if let Some(loader) = &mut loader {
++                            loader.clear();
++                        }
++                    }
+@@ -246 +257,3 @@ impl Worker {
+-                        let icon = if let Some(index) = cache.iter().position(|(p, _)| p == &path) {
++                        let icon = if let Some(loader) = &mut loader {
++                            loader.load(&path)
++                        } else if let Some(index) = cache.iter().position(|(p, _)| p == &path) {
+@@ -271,0 +285,15 @@ impl Worker {
++                    let stats = loader.as_ref().map_or_else(
++                        || resource_cache::Stats {
++                            hits,
++                            misses,
++                            fallbacks,
++                            max_load_us,
++                            total_load_us,
++                            cache: cache.len(),
++                            parses: if direct_icons { misses } else { 0 },
++                            extracts: if direct_icons { misses } else { 0 },
++                            generic_copies: fallbacks,
++                            ..Default::default()
++                        },
++                        |loader| loader.stats(),
++                    );
+@@ -273 +301 @@ impl Worker {
+-                        fallbacks,
++                        fallbacks: stats.fallbacks,
+@@ -276,5 +304,6 @@ impl Worker {
+-                        hits,
+-                        misses,
+-                        cache: cache.len(),
+-                        max_load_us,
+-                        total_load_us,
++                        hits: stats.hits,
++                        misses: stats.misses,
++                        cache: stats.cache,
++                        max_load_us: stats.max_load_us,
++                        total_load_us: stats.total_load_us,
++                        stats,
+@@ -290,0 +320 @@ impl Worker {
++                drop(loader);
+@@ -315,0 +346 @@ pub struct Session {
++    cached_icons: bool,
+@@ -324,0 +356,8 @@ pub struct Session {
++    pub parses: Cell<usize>,
++    pub metadata_hits: Cell<usize>,
++    pub metadata_entries: Cell<usize>,
++    pub metadata_bytes: Cell<usize>,
++    pub generic_copies: Cell<usize>,
++    pub shared_resources: Cell<usize>,
++    pub extracts: Cell<usize>,
++    pub invalidations: Cell<usize>,
+@@ -327 +366 @@ impl Session {
+-    pub fn new(hwnd: Hwnd, direct_icons: bool) -> Self {
++    pub fn new(hwnd: Hwnd, direct_icons: bool, cached_icons: bool) -> Self {
+@@ -331,0 +371 @@ impl Session {
++            cached_icons,
+@@ -340,0 +381,8 @@ impl Session {
++            parses: Cell::new(0),
++            metadata_hits: Cell::new(0),
++            metadata_entries: Cell::new(0),
++            metadata_bytes: Cell::new(0),
++            generic_copies: Cell::new(0),
++            shared_resources: Cell::new(0),
++            extracts: Cell::new(0),
++            invalidations: Cell::new(0),
+@@ -344 +392,6 @@ impl Session {
+-        if paths == *self.paths.borrow() && self.requested.get() != 0 {
++        let invalidating = self
++            .worker
++            .borrow()
++            .as_ref()
++            .is_some_and(|worker| worker.shared.invalidate.load(Ordering::Acquire));
++        if paths == *self.paths.borrow() && self.requested.get() != 0 && !invalidating {
+@@ -350 +403,5 @@ impl Session {
+-            *worker = Some(Worker::new(self.hwnd, self.direct_icons)?);
++            *worker = Some(Worker::new(
++                self.hwnd,
++                self.direct_icons,
++                self.cached_icons,
++            )?);
+@@ -358,0 +416,6 @@ impl Session {
++    pub fn invalidate(&self) {
++        self.paths.borrow_mut().clear();
++        if let Some(worker) = self.worker.borrow().as_ref() {
++            worker.shared.invalidate.store(true, Ordering::Release);
++        }
++    }
+@@ -369,0 +433,8 @@ impl Session {
++            self.parses.set(result.stats.parses);
++            self.metadata_hits.set(result.stats.metadata_hits);
++            self.metadata_entries.set(result.stats.metadata_entries);
++            self.metadata_bytes.set(result.stats.metadata_bytes);
++            self.generic_copies.set(result.stats.generic_copies);
++            self.shared_resources.set(result.stats.shared_resources);
++            self.extracts.set(result.stats.extracts);
++            self.invalidations.set(result.stats.invalidations);
+diff --git a/src/platform/windows/window.rs b/src/platform/windows/window.rs
+index e8b9121..bf393b1 100644
+--- a/src/platform/windows/window.rs
++++ b/src/platform/windows/window.rs
+@@ -32,0 +33 @@ pub struct Options {
++    pub cached_icons: bool,
+@@ -43,0 +45 @@ impl Default for Options {
++            cached_icons: false,
+@@ -66,0 +69 @@ struct Runtime {
++    cached_icons: bool,
+@@ -150,4 +153,7 @@ fn request_icons() {
+-        Rc::clone(
+-            s.icons
+-                .get_or_insert_with(|| Rc::new(icons::Session::new(WINDOW.get(), s.direct_icons))),
+-        )
++        Rc::clone(s.icons.get_or_insert_with(|| {
++            Rc::new(icons::Session::new(
++                WINDOW.get(),
++                s.direct_icons,
++                s.cached_icons,
++            ))
++        }))
+@@ -409,0 +416 @@ fn refresh() {
++    invalidate_icons();
+@@ -412,0 +420,13 @@ fn refresh() {
++fn invalidate_icons() {
++    if let Some(session) = state(|s| {
++        if s.cached_icons {
++            s.icons.clone()
++        } else {
++            None
++        }
++    })
++    .flatten()
++    {
++        session.invalidate();
++    }
++}
+@@ -569 +589 @@ unsafe extern "system" fn window_proc(hwnd: Hwnd, msg: u32, wp: usize, lp: isize
+-        if let (Some(renderer), Some(view)) = (renderer(), view()) {
++        if renderer().is_some() && view().is_some() {
+@@ -572 +592 @@ unsafe extern "system" fn window_proc(hwnd: Hwnd, msg: u32, wp: usize, lp: isize
+-                renderer.paint(hwnd, &view);
++                SendMessageW(hwnd, 0xf, 0, 0);
+@@ -578 +598 @@ unsafe extern "system" fn window_proc(hwnd: Hwnd, msg: u32, wp: usize, lp: isize
+-                renderer.paint(hwnd, &view);
++                SendMessageW(hwnd, 0xf, 0, 0);
+@@ -611,0 +632,8 @@ unsafe extern "system" fn window_proc(hwnd: Hwnd, msg: u32, wp: usize, lp: isize
++    if msg == 0x800b {
++        if let Some(session) = state(|s| s.icons.clone()).flatten() {
++            session.invalidate();
++            request_icons();
++            return 1;
++        }
++        return 0;
++    }
+@@ -629,0 +658,8 @@ unsafe extern "system" fn window_proc(hwnd: Hwnd, msg: u32, wp: usize, lp: isize
++                8 => i.parses.get(),
++                9 => i.metadata_hits.get(),
++                10 => i.metadata_entries.get(),
++                11 => i.metadata_bytes.get(),
++                12 => i.generic_copies.get(),
++                13 => i.shared_resources.get(),
++                14 => i.extracts.get(),
++                15 => i.invalidations.get(),
+@@ -639 +675,8 @@ unsafe extern "system" fn window_proc(hwnd: Hwnd, msg: u32, wp: usize, lp: isize
+-                repaint(false);
++                if state(|s| s.cached_icons).unwrap_or(false) {
++                    if let Some(renderer) = renderer() {
++                        let rows = state(|s| s.view.rows.len()).unwrap_or(0);
++                        renderer.invalidate_icons(hwnd, rows);
++                    }
++                } else {
++                    repaint(false);
++                }
+@@ -779,0 +823 @@ unsafe extern "system" fn window_proc(hwnd: Hwnd, msg: u32, wp: usize, lp: isize
++                    invalidate_icons();
+@@ -943,0 +988 @@ pub fn run(options: Options) -> io::Result<()> {
++                    clip_aware: options.cached_icons,
+@@ -961,0 +1007 @@ pub fn run(options: Options) -> io::Result<()> {
++                cached_icons: options.cached_icons,
+diff --git a/src/ui/native.rs b/src/ui/native.rs
+index 7524c95..22d797e 100644
+--- a/src/ui/native.rs
++++ b/src/ui/native.rs
+@@ -15,0 +16 @@ pub struct View {
++    pub clip_aware: bool,
+@@ -28,0 +30,3 @@ pub fn color(Rgb(r, g, b): Rgb) -> u32 {
++fn overlaps(a: &Rect, b: &Rect) -> bool {
++    a.left < b.right && b.left < a.right && a.top < b.bottom && b.top < a.bottom
++}
+@@ -117,7 +121,9 @@ impl Renderer {
+-                DrawTextW(
+-                    dc,
+-                    row.as_ptr(),
+-                    row.len() as i32,
+-                    &mut rect,
+-                    0x20 | 4 | 0x8000 | 0x800,
+-                );
++                if !view.clip_aware || overlaps(&paint.rect, &rect) {
++                    DrawTextW(
++                        dc,
++                        row.as_ptr(),
++                        row.len() as i32,
++                        &mut rect,
++                        0x20 | 4 | 0x8000 | 0x800,
++                    );
++                }
+@@ -133 +139,3 @@ impl Renderer {
+-                DrawTextW(dc, self.empty.as_ptr(), -1, &mut rect, 0x20 | 4 | 0x800);
++                if !view.clip_aware || overlaps(&paint.rect, &rect) {
++                    DrawTextW(dc, self.empty.as_ptr(), -1, &mut rect, 0x20 | 4 | 0x800);
++                }
+@@ -141,7 +149,9 @@ impl Renderer {
+-            DrawTextW(
+-                dc,
+-                view.status.as_ptr(),
+-                view.status.len() as i32,
+-                &mut status,
+-                0x20 | 4 | 0x8000 | 0x800,
+-            );
++            if !view.clip_aware || overlaps(&paint.rect, &status) {
++                DrawTextW(
++                    dc,
++                    view.status.as_ptr(),
++                    view.status.len() as i32,
++                    &mut status,
++                    0x20 | 4 | 0x8000 | 0x800,
++                );
++            }
+@@ -150 +160,3 @@ impl Renderer {
+-            DrawTextW(dc, self.help.as_ptr(), -1, &mut status, 0x20 | 4 | 0x800);
++            if !view.clip_aware || overlaps(&paint.rect, &status) {
++                DrawTextW(dc, self.help.as_ptr(), -1, &mut status, 0x20 | 4 | 0x800);
++            }
+@@ -159,0 +172,12 @@ impl Renderer {
++    pub fn invalidate_icons(&self, hwnd: Hwnd, rows: usize) {
++        let left = self.scale(self.theme.padding) * 2;
++        let region = Rect {
++            left,
++            top: self.top(),
++            right: left + self.scale(20),
++            bottom: self.top() + self.scale(self.theme.row_height) * rows as i32,
++        };
++        // Only the icon column changed. Existing list text/background remain valid; GDI's
++        // update-region clipping applies to paint(), with no additional full-window bitmap.
++        unsafe { InvalidateRect(hwnd, &region, 0) };
++    }
+@@ -172,0 +197,36 @@ impl Drop for Renderer {
++#[cfg(test)]
++mod tests {
++    use super::*;
++    #[test]
++    fn icon_column_does_not_overlap_text_or_footer() {
++        let icon = Rect {
++            left: 24,
++            top: 58,
++            right: 44,
++            bottom: 96,
++        };
++        let text = Rect {
++            left: 52,
++            top: 58,
++            right: 548,
++            bottom: 96,
++        };
++        let footer = Rect {
++            left: 12,
++            top: 100,
++            right: 548,
++            bottom: 123,
++        };
++        assert!(!overlaps(&icon, &text));
++        assert!(!overlaps(&icon, &footer));
++        let all = Rect {
++            left: 0,
++            top: 0,
++            right: 560,
++            bottom: 160,
++        };
++        assert!(overlaps(&all, &icon));
++        assert!(overlaps(&all, &text));
++        assert!(overlaps(&all, &footer));
++    }
++}

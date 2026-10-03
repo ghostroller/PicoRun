@@ -1,5 +1,6 @@
 //! Native verification helpers live here to keep all Win32 unsafe at the platform boundary.
 mod english_probe;
+mod icons_probe;
 mod ime_probe;
 use super::{discovery, ffi::*, tray, wide};
 use crate::cache;
@@ -466,8 +467,11 @@ pub fn run() -> io::Result<()> {
     let real = args.iter().any(|a| a == "--real");
     let baseline = args.iter().any(|a| a == "--baseline");
     let installed_ime = args.iter().any(|a| a == "--ime-real");
+    let icons = args.iter().any(|a| a == "--icons");
     super::window::enable_dpi();
-    let root = std::env::current_dir()?.join("runtime").join(if real {
+    let root = std::env::current_dir()?.join("runtime").join(if icons {
+        "probe-icons-controlled"
+    } else if real {
         "probe-real"
     } else {
         "probe-controlled"
@@ -529,6 +533,9 @@ pub fn run() -> io::Result<()> {
     if !real {
         launch_args.extend(["--source".into(), source.as_os_str().to_owned()]);
     }
+    if icons {
+        launch_args.push("--measure-icons".into());
+    }
     let mut timings = Vec::new();
     let mut memory = String::from("stage,private_bytes,working_set_bytes,peak_commit_bytes,peak_working_set_bytes,gdi_handles,user_handles,cpu_100ns\n");
     let mut checks = String::new();
@@ -536,6 +543,9 @@ pub fn run() -> io::Result<()> {
     let theme_path = data.join("theme.txt");
     let input_path = data.join("english-input.txt");
     let _ = fs::remove_file(&input_path);
+    if icons {
+        let _ = fs::remove_file(data.join("icons.txt"));
+    }
     fs::write(&theme_path, "dark\n")?;
     for run in 0..5 {
         if run == 0 {
@@ -544,6 +554,9 @@ pub fn run() -> io::Result<()> {
         let start = Instant::now();
         let mut child = spawn(&exe, &launch_args)?;
         let (hwnd, edit) = wait_window(&mut child)?;
+        if icons && run == 0 && !real {
+            icons_probe::features(hwnd, edit, child.0.id(), &data, &root, &mut checks)?;
+        }
         let startup = start.elapsed().as_secs_f64() * 1000.0;
         thread::sleep(Duration::from_millis(100));
         if !baseline {
@@ -937,6 +950,13 @@ pub fn run() -> io::Result<()> {
         let mut restarted = spawn(&exe, &launch_args)?;
         let (hwnd, _) = wait_window(&mut restarted)?;
         english_probe::restarted(hwnd, &mut checks)?;
+        if icons {
+            expect(
+                unsafe { SendMessageW(hwnd, 0x8006, 17, 0) } == 1,
+                "restart restores saved icon setting",
+                &mut checks,
+            )?;
+        }
         unsafe {
             SendMessageW(hwnd, 0x8001, 0, 0);
             SendMessageW(hwnd, 0xf, 0, 0);

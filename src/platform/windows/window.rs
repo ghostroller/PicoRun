@@ -1,4 +1,7 @@
-use super::{discovery, ffi::*, ime, input_language, settings, tray, wide, Hotkey, DEFAULT_HOTKEY};
+use super::{
+    discovery, ffi::*, icons, ime, input_language, settings, tray, wide, Hotkey, DEFAULT_HOTKEY,
+};
+mod diagnostics;
 use crate::{
     cache,
     catalog::Catalog,
@@ -26,6 +29,11 @@ pub struct Options {
     pub sources: Vec<PathBuf>,
     pub hidden: bool,
     pub theme: Option<ThemeMode>,
+    pub icons: Option<bool>,
+    /// Enable own-window read-only counters/query probes. Normal input/focus/hotkeys stay active.
+    pub measure_icons: bool,
+    /// Test driver can hold the measurement window visible, matching the frozen prototype.
+    pub hold_measurement_window: bool,
 }
 impl Default for Options {
     fn default() -> Self {
@@ -35,6 +43,9 @@ impl Default for Options {
             sources: Vec::new(),
             hidden: false,
             theme: None,
+            icons: None,
+            measure_icons: false,
+            hold_measurement_window: false,
         }
     }
 }
@@ -55,6 +66,10 @@ struct Runtime {
     text: String,
     refreshing: bool,
     system_sources: bool,
+    icons: Option<Rc<icons::Session>>,
+    icon_settings: PathBuf,
+    measure_icons: bool,
+    hold_measurement_window: bool,
 }
 thread_local! {
     static STATE: RefCell<Option<Runtime>> = const { RefCell::new(None) };
@@ -110,6 +125,9 @@ fn view() -> Option<View> {
 }
 fn repaint(resize: bool) {
     let hwnd = WINDOW.get();
+    if state(|s| s.view.show_icons).unwrap_or(false) && unsafe { IsWindowVisible(hwnd) } != 0 {
+        request_icons();
+    }
     if let Some(renderer) = renderer() {
         if resize {
             let rows = state(|s| s.controller.results().len()).unwrap_or(0);
@@ -124,6 +142,73 @@ fn repaint(resize: bool) {
             }
         }
         renderer.invalidate(hwnd);
+    }
+}
+fn request_icons() {
+    let Some(session) = state(|s| {
+        if !s.view.show_icons {
+            return None;
+        }
+        Some(Rc::clone(s.icons.get_or_insert_with(|| {
+            Rc::new(icons::Session::new(WINDOW.get()))
+        })))
+    })
+    .flatten() else {
+        return;
+    };
+    let paths = state(|s| {
+        s.controller
+            .results()
+            .iter()
+            .map(|hit| {
+                match &s.controller.catalog().entries()[hit.entry_index].target {
+                    crate::model::LaunchTarget::ShellPath(path) => path.clone(),
+                    // Preserve row alignment for unsupported Store entries, without file access.
+                    _ => PathBuf::new(),
+                }
+            })
+            .collect()
+    })
+    .unwrap_or_default();
+    let _ = view();
+    match session.request(paths) {
+        Ok(true) => {
+            let previous = state(|s| {
+                std::mem::replace(&mut s.view.icons, vec![None; s.view.rows.len()].into())
+            });
+            drop(previous); // HICON destruction must happen outside the Runtime borrow.
+        }
+        Ok(false) => {}
+        Err(error) => {
+            drop(session);
+            set_icons(false);
+            report(format!("图标加载失败：{error}"));
+        }
+    }
+}
+fn set_icons(enabled: bool) {
+    let previous = state(|s| {
+        s.view.show_icons = enabled;
+        s.view.clip_aware = enabled;
+        (s.icons.take(), std::mem::take(&mut s.view.icons))
+    });
+    // Shutdown can wait for an in-flight extraction. No mutable UI borrow survives the join,
+    // channel destruction or native icon release. A late READY message cannot restore old icons.
+    drop(previous);
+    repaint(false);
+}
+fn toggle_icons() {
+    let Some((enabled, path)) = state(|s| (!s.view.show_icons, s.icon_settings.clone())) else {
+        return;
+    };
+    set_icons(enabled);
+    if settings::save_toggle(&path, enabled).is_err() {
+        report("应用图标选项保存失败；重启后可能恢复原设置");
+    }
+}
+fn invalidate_icons() {
+    if let Some(session) = state(|s| s.icons.clone()).flatten() {
+        session.invalidate();
     }
 }
 fn sync_query() {
@@ -211,6 +296,7 @@ fn show() {
             }
         }
         SendMessageW(EDIT.get(), 0xb1, 0, -1);
+        request_icons();
         UpdateWindow(hwnd);
     }
 }
@@ -357,6 +443,7 @@ fn refresh() {
             });
         }
     }
+    invalidate_icons();
     sync_query();
     repaint(true);
 }
@@ -424,6 +511,7 @@ fn tray_command(command: u32) {
         tray::LIGHT => change_theme(ThemeMode::Light),
         tray::DARK => change_theme(ThemeMode::Dark),
         tray::ENGLISH => toggle_english(),
+        tray::ICONS => toggle_icons(),
         tray::EXIT => unsafe {
             DestroyWindow(WINDOW.get());
         },
@@ -508,6 +596,31 @@ unsafe extern "system" fn edit_proc(hwnd: Hwnd, msg: u32, wp: usize, lp: isize) 
     CallWindowProcW(EDIT_PROC.get(), hwnd, msg, wp, lp)
 }
 unsafe extern "system" fn window_proc(hwnd: Hwnd, msg: u32, wp: usize, lp: isize) -> isize {
+    if state(|s| s.measure_icons).unwrap_or(false) {
+        if let Some(result) = diagnostics::message(hwnd, msg, wp) {
+            return result;
+        }
+    }
+    if msg == icons::READY {
+        if let Some(session) = state(|s| s.icons.clone()).flatten() {
+            if let Some(result) = session.receive() {
+                if result.failed {
+                    drop(session);
+                    set_icons(false);
+                    report("图标加载失败：无法初始化 Shell COM");
+                } else {
+                    let previous =
+                        state(|s| std::mem::replace(&mut s.view.icons, result.icons.into()));
+                    drop(previous);
+                    if let Some(renderer) = renderer() {
+                        let rows = state(|s| s.view.rows.len()).unwrap_or(0);
+                        renderer.invalidate_icons(hwnd, rows);
+                    }
+                }
+            }
+        }
+        return 0;
+    }
     if msg != 0 && msg == TASKBAR_CREATED.get() {
         if let Some(tray) = state(|s| s.tray.clone()).flatten() {
             if let Err(error) = tray.install() {
@@ -567,15 +680,18 @@ unsafe extern "system" fn window_proc(hwnd: Hwnd, msg: u32, wp: usize, lp: isize
                     if TRAY_MENU_OPEN.replace(true) {
                         return 0;
                     }
-                    if let Some((tray, mode, start_english)) =
-                        state(|s| s.tray.clone().map(|t| (t, s.theme_mode, s.start_english)))
-                            .flatten()
+                    if let Some((tray, mode, start_english, show_icons)) = state(|s| {
+                        s.tray
+                            .clone()
+                            .map(|t| (t, s.theme_mode, s.start_english, s.view.show_icons))
+                    })
+                    .flatten()
                     {
                         let point = Point {
                             x: wp as u16 as i16 as i32,
                             y: (wp >> 16) as u16 as i16 as i32,
                         };
-                        match tray.menu(mode, start_english, point) {
+                        match tray.menu(mode, start_english, show_icons, point) {
                             Ok(command) => tray_command(command),
                             Err(error) => report(error),
                         }
@@ -608,6 +724,9 @@ unsafe extern "system" fn window_proc(hwnd: Hwnd, msg: u32, wp: usize, lp: isize
             return 0;
         }
         0x6 if wp & 0xffff == 0 => {
+            if state(|s| s.measure_icons && s.hold_measurement_window).unwrap_or(false) {
+                return 0;
+            }
             hide();
             return 0;
         }
@@ -644,6 +763,7 @@ unsafe extern "system" fn window_proc(hwnd: Hwnd, msg: u32, wp: usize, lp: isize
                         rect.bottom - rect.top,
                         0x14,
                     );
+                    invalidate_icons();
                     repaint(true);
                 }
             }
@@ -687,6 +807,8 @@ unsafe extern "system" fn window_proc(hwnd: Hwnd, msg: u32, wp: usize, lp: isize
             return 0;
         }
         0x2 => {
+            let icons = state(|s| (s.icons.take(), std::mem::take(&mut s.view.icons)));
+            drop(icons);
             let _ = input_language::restore();
             let tray = state(|s| s.tray.take()).flatten();
             drop(tray); // Native icon deletion runs outside the Runtime borrow.
@@ -776,6 +898,10 @@ pub fn run(options: Options) -> io::Result<()> {
         let settings_path = data.join("theme.txt");
         let input_settings = data.join("english-input.txt");
         let start_english = settings::load_english(&input_settings);
+        let icon_settings = data.join("icons.txt");
+        let show_icons = options
+            .icons
+            .unwrap_or_else(|| settings::load_toggle(&icon_settings));
         let mode = options
             .theme
             .unwrap_or_else(|| settings::load(&settings_path));
@@ -804,7 +930,11 @@ pub fn run(options: Options) -> io::Result<()> {
             *s.borrow_mut() = Some(Runtime {
                 controller: Controller::new(catalog),
                 renderer: initial_renderer,
-                view: View::default(),
+                view: View {
+                    show_icons,
+                    clip_aware: show_icons,
+                    ..View::default()
+                },
                 view_dirty: true,
                 theme_mode: mode,
                 settings: settings_path,
@@ -818,6 +948,10 @@ pub fn run(options: Options) -> io::Result<()> {
                 text: String::with_capacity(128),
                 refreshing: false,
                 system_sources,
+                icons: None,
+                icon_settings,
+                measure_icons: options.measure_icons,
+                hold_measurement_window: options.hold_measurement_window,
             })
         });
         let class_name = wide(CLASS);

@@ -28,10 +28,18 @@ pub fn save(path: &Path, mode: ThemeMode) -> io::Result<()> {
 }
 
 pub fn load_english(path: &Path) -> bool {
+    load_toggle(path)
+}
+
+pub fn load_toggle(path: &Path) -> bool {
     read(path).is_ok_and(|text| text.trim() == "on")
 }
 
 pub fn save_english(path: &Path, enabled: bool) -> io::Result<()> {
+    save_toggle(path, enabled)
+}
+
+pub fn save_toggle(path: &Path, enabled: bool) -> io::Result<()> {
     write(path, if enabled { "on" } else { "off" })
 }
 
@@ -47,6 +55,28 @@ fn write(path: &Path, value: &str) -> io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn icons_are_opt_in_and_independent_of_english_and_theme() {
+        let directory =
+            std::env::temp_dir().join(format!("picorun-icons-test-{}", std::process::id()));
+        let icons = directory.join("icons.txt");
+        let english = directory.join("english-input.txt");
+        let theme = directory.join("theme.txt");
+        assert!(!load_toggle(&icons));
+        save_english(&english, true).unwrap();
+        save(&theme, ThemeMode::Light).unwrap();
+        save_toggle(&icons, true).unwrap();
+        assert!(load_toggle(&icons));
+        save_toggle(&icons, false).unwrap();
+        assert!(!load_toggle(&icons));
+        assert!(load_english(&english));
+        assert_eq!(load(&theme), ThemeMode::Light);
+        for invalid in [b"true".as_slice(), &[255], &[b' '; 4096]] {
+            fs::write(&icons, invalid).unwrap();
+            assert!(!load_toggle(&icons));
+        }
+        fs::remove_dir_all(directory).unwrap();
+    }
     #[test]
     fn saved_palette_survives_replacement_and_invalid_settings_fall_back() {
         let directory =

@@ -137,10 +137,16 @@ pub(super) fn injected(
 }
 
 fn input_focus(hwnd: Hwnd) -> io::Result<()> {
-    if unsafe { GetForegroundWindow() } != hwnd {
-        return Err(io::Error::other(
-            "own launcher lost foreground before IME keyboard injection",
-        ));
+    let foreground = unsafe { GetForegroundWindow() };
+    if foreground != hwnd {
+        let mut owner = 0;
+        unsafe {
+            GetWindowThreadProcessId(foreground, &mut owner);
+        }
+        return Err(io::Error::other(format!(
+            "own launcher lost foreground before IME keyboard injection (foreground={foreground:p}, pid={owner}, own_visible={})",
+            unsafe { IsWindowVisible(hwnd) }
+        )));
     }
     Ok(())
 }

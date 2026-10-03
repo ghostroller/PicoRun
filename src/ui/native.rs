@@ -1,15 +1,19 @@
 //! GDI renderer. Snapshot data and Theme are independent of search and Win32 input.
+use crate::platform::windows::icons::Icon;
 use crate::{
     platform::windows::{ffi::*, wide},
     theme::{Rgb, Theme},
 };
-use std::{io, ptr::null, rc::Rc};
+use std::{io, ptr::null, rc::Rc, sync::Arc};
 
 #[derive(Clone, Default)]
 pub struct View {
     pub rows: Rc<[Vec<u16>]>,
     pub selected: Option<usize>,
     pub status: Rc<[u16]>,
+    pub show_icons: bool,
+    pub icons: Rc<[Option<Arc<Icon>>]>,
+    pub clip_aware: bool,
 }
 pub struct Renderer {
     pub theme: Theme,
@@ -22,6 +26,9 @@ pub struct Renderer {
 }
 pub fn color(Rgb(r, g, b): Rgb) -> u32 {
     u32::from(r) | u32::from(g) << 8 | u32::from(b) << 16
+}
+fn overlaps(a: &Rect, b: &Rect) -> bool {
+    a.left < b.right && b.left < a.right && a.top < b.bottom && b.top < a.bottom
 }
 impl Renderer {
     pub fn new(theme: Theme, dpi: u32) -> io::Result<Self> {
@@ -94,13 +101,32 @@ impl Renderer {
                     FillRect(dc, &rect, self.selection);
                 }
                 rect.left += pad;
-                DrawTextW(
-                    dc,
-                    row.as_ptr(),
-                    row.len() as i32,
-                    &mut rect,
-                    0x20 | 4 | 0x8000 | 0x800,
-                );
+                if view.show_icons {
+                    let size = self.scale(20);
+                    if let Some(Some(icon)) = view.icons.get(index) {
+                        DrawIconEx(
+                            dc,
+                            rect.left,
+                            top + (row_height - size) / 2,
+                            icon.handle(),
+                            size,
+                            size,
+                            0,
+                            std::ptr::null_mut(),
+                            3,
+                        );
+                    }
+                    rect.left += size + self.scale(8);
+                }
+                if !view.clip_aware || overlaps(&paint.rect, &rect) {
+                    DrawTextW(
+                        dc,
+                        row.as_ptr(),
+                        row.len() as i32,
+                        &mut rect,
+                        0x20 | 4 | 0x8000 | 0x800,
+                    );
+                }
             }
             SetTextColor(dc, color(self.theme.muted));
             if view.rows.is_empty() {
@@ -110,7 +136,9 @@ impl Renderer {
                     right: client.right - pad,
                     bottom: self.top() + row_height,
                 };
-                DrawTextW(dc, self.empty.as_ptr(), -1, &mut rect, 0x20 | 4 | 0x800);
+                if !view.clip_aware || overlaps(&paint.rect, &rect) {
+                    DrawTextW(dc, self.empty.as_ptr(), -1, &mut rect, 0x20 | 4 | 0x800);
+                }
             }
             let mut status = Rect {
                 left: pad,
@@ -118,16 +146,20 @@ impl Renderer {
                 right: client.right - pad,
                 bottom: client.bottom - self.scale(28),
             };
-            DrawTextW(
-                dc,
-                view.status.as_ptr(),
-                view.status.len() as i32,
-                &mut status,
-                0x20 | 4 | 0x8000 | 0x800,
-            );
+            if !view.clip_aware || overlaps(&paint.rect, &status) {
+                DrawTextW(
+                    dc,
+                    view.status.as_ptr(),
+                    view.status.len() as i32,
+                    &mut status,
+                    0x20 | 4 | 0x8000 | 0x800,
+                );
+            }
             status.top = client.bottom - self.scale(28);
             status.bottom = client.bottom - self.scale(5);
-            DrawTextW(dc, self.help.as_ptr(), -1, &mut status, 0x20 | 4 | 0x800);
+            if !view.clip_aware || overlaps(&paint.rect, &status) {
+                DrawTextW(dc, self.help.as_ptr(), -1, &mut status, 0x20 | 4 | 0x800);
+            }
             SelectObject(dc, previous_font);
             EndPaint(hwnd, &paint);
         }
@@ -136,6 +168,18 @@ impl Renderer {
         unsafe {
             InvalidateRect(hwnd, null(), 0);
         }
+    }
+    pub fn invalidate_icons(&self, hwnd: Hwnd, rows: usize) {
+        let left = self.scale(self.theme.padding) * 2;
+        let region = Rect {
+            left,
+            top: self.top(),
+            right: left + self.scale(20),
+            bottom: self.top() + self.scale(self.theme.row_height) * rows as i32,
+        };
+        // Only the icon column changed. Existing list text/background remain valid; GDI's
+        // update-region clipping applies to paint(), with no additional full-window bitmap.
+        unsafe { InvalidateRect(hwnd, &region, 0) };
     }
 }
 impl Drop for Renderer {
@@ -148,5 +192,41 @@ impl Drop for Renderer {
                 }
             }
         }
+    }
+}
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn icon_column_does_not_overlap_text_or_footer() {
+        let icon = Rect {
+            left: 24,
+            top: 58,
+            right: 44,
+            bottom: 96,
+        };
+        let text = Rect {
+            left: 52,
+            top: 58,
+            right: 548,
+            bottom: 96,
+        };
+        let footer = Rect {
+            left: 12,
+            top: 100,
+            right: 548,
+            bottom: 123,
+        };
+        assert!(!overlaps(&icon, &text));
+        assert!(!overlaps(&icon, &footer));
+        let all = Rect {
+            left: 0,
+            top: 0,
+            right: 560,
+            bottom: 160,
+        };
+        assert!(overlaps(&all, &icon));
+        assert!(overlaps(&all, &text));
+        assert!(overlaps(&all, &footer));
     }
 }

@@ -148,6 +148,17 @@ unsafe extern "system" {
         xor: *const u8,
     ) -> Handle;
     pub fn DestroyIcon(icon: Handle) -> i32;
+    pub fn DrawIconEx(
+        dc: Handle,
+        x: i32,
+        y: i32,
+        icon: Handle,
+        width: i32,
+        height: i32,
+        step: u32,
+        brush: Handle,
+        flags: u32,
+    ) -> i32;
     pub fn CreatePopupMenu() -> Handle;
     pub fn AppendMenuW(menu: Handle, flags: u32, id: usize, text: *const u16) -> i32;
     pub fn CheckMenuRadioItem(menu: Handle, first: u32, last: u32, check: u32, flags: u32) -> i32;

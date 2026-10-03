@@ -1,6 +1,7 @@
 //! Native system boundary; no discovery or Shell calls occur on the search path.
 mod discovery;
 pub mod ffi;
+pub(crate) mod icons;
 mod ime;
 mod input_language;
 mod settings;
