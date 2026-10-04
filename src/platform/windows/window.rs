@@ -215,14 +215,14 @@ fn invalidate_icons() {
         session.invalidate();
     }
 }
-fn sync_query() {
+fn sync_query() -> bool {
     let edit = EDIT.get();
     if edit.is_null() {
-        return;
+        return false;
     }
     // Leave native preedit text/candidate geometry alone. Read the completed Edit text on end/close.
     if is_composing() {
-        return;
+        return false;
     }
     let Some((mut buffer, mut text)) = state(|s| {
         (
@@ -230,7 +230,7 @@ fn sync_query() {
             std::mem::take(&mut s.text),
         )
     }) else {
-        return;
+        return false;
     };
     // Buffer is local, with no Rust borrow of Runtime while the native Edit can reenter.
     unsafe {
@@ -254,6 +254,7 @@ fn sync_query() {
     if changed {
         repaint(true);
     }
+    changed
 }
 fn show() {
     let hwnd = WINDOW.get();
@@ -858,24 +859,37 @@ unsafe extern "system" fn window_proc(hwnd: Hwnd, msg: u32, wp: usize, lp: isize
         }
         0x14 => return 1,
         0x201 => {
+            // Ignore queued clicks after activation hides the panel, and leave IME
+            // preedit/candidates owned by Edit just as the Enter path does.
+            if IsWindowVisible(hwnd) == 0 || is_composing() {
+                return 0;
+            }
+            let query_changed = sync_query();
             if let Some(renderer) = renderer() {
+                let x = lp as u16 as i16 as i32;
                 let y = ((lp as u32 >> 16) as u16) as i16 as i32;
-                if y >= renderer.top() {
-                    sync_query();
-                    let index =
-                        ((y - renderer.top()) / renderer.scale(renderer.theme.row_height)) as usize;
-                    let changed = state(|s| {
-                        let previous = s.controller.selected_index();
-                        if index < s.controller.results().len() {
-                            let old = s.controller.selected_index().unwrap_or(0);
-                            s.controller.select_relative(index as isize - old as isize);
-                        }
-                        (previous, s.controller.selected_index())
-                    });
-                    if let Some((previous, selected)) = changed {
+                let clicked = state(|s| {
+                    renderer
+                        .row_at(x, y, s.controller.results().len())
+                        .map(|index| {
+                            let previous = s.controller.selected_index();
+                            if previous != Some(index) {
+                                let old = previous.unwrap_or(0);
+                                s.controller.select_relative(index as isize - old as isize);
+                            }
+                            (previous, Some(index))
+                        })
+                })
+                .flatten();
+                if let Some((previous, selected)) = clicked {
+                    // A coalesced text change can replace the row under the cursor.
+                    // Let that click select the new result; require another click to open it.
+                    if previous == selected && !query_changed {
+                        activate();
+                    } else {
                         renderer.invalidate_selection(hwnd, previous, selected);
+                        SetFocus(EDIT.get());
                     }
-                    SetFocus(EDIT.get());
                 }
             }
             return 0;

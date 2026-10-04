@@ -76,6 +76,17 @@ impl Renderer {
     pub fn top(&self) -> i32 {
         self.scale(58)
     }
+    /// Hit only a visible result's painted selection area, excluding padding and footer.
+    pub fn row_at(&self, x: i32, y: i32, rows: usize) -> Option<usize> {
+        if x < self.scale(self.theme.padding)
+            || x >= self.scale(self.theme.width - self.theme.padding)
+            || y < self.top()
+        {
+            return None;
+        }
+        let index = ((y - self.top()) / self.scale(self.theme.row_height)) as usize;
+        (index < rows).then_some(index)
+    }
     pub fn height(&self, rows: usize) -> i32 {
         self.top() + self.scale(self.theme.row_height) * rows.max(1) as i32 + self.scale(60)
     }

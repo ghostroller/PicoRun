@@ -1,9 +1,11 @@
 //! Native verification helpers live here to keep all Win32 unsafe at the platform boundary.
+mod dedup_probe;
 mod english_probe;
 mod flicker_probe;
 mod icons_probe;
 mod ime_probe;
 mod input_session_probe;
+mod mouse_probe;
 mod startup_probe;
 use super::{discovery, ffi::*, tray, wide};
 use crate::cache;
@@ -471,8 +473,14 @@ pub fn run() -> io::Result<()> {
     if args.first().is_some_and(|a| a == "--startup") {
         return startup_probe::run();
     }
+    if args.first().is_some_and(|a| a == "--dedup") {
+        return dedup_probe::run(args.iter().any(|a| a == "--bench"));
+    }
     if args.first().is_some_and(|a| a == "--flicker") {
         return flicker_probe::run(args.iter().any(|a| a == "--reference"));
+    }
+    if args.first().is_some_and(|a| a == "--mouse") {
+        return mouse_probe::run();
     }
     if args.first().is_some_and(|a| a == "--input-source") {
         return input_session_probe::source();

@@ -1,8 +1,29 @@
 # 前期证据与适用范围
 
+## 2026-10-04：其他启动器的应用去重
+
+实施前只读核对下列固定提交的源代码和现有测试，未构建、运行其他启动器或进行同机性能比较。Flow 为 dev，其他为各项目默认分支快照，不将源码快照等同于所有发布版本。这里只借鉴原则，不复制外部实现；随后用户批准的 PicoRun 实现与实测见 [DEDUP_RESULTS.md](DEDUP_RESULTS.md)。
+
+| 项目与提交 | 已核对的去重规则 | 对本项目的意义 |
+| --- | --- | --- |
+| Flow Launcher `5da5103df70632485a72ce0dec81d5f4df9faa57` | 自动索引来源按实际目标与参数拼接、整体转小写后分组，优先开始菜单快捷方式，其次带描述的项；最终另按入口 UID 去重。用户自定义来源没有全部经过该启动分组。 | 有参数意识及入口优先级；键不包含工作目录、窗口模式或运行权限，参数也被转为小写，不宜直接采用相同规则。[ProgramsHasher / All](https://github.com/Flow-Launcher/Flow.Launcher/blob/5da5103df70632485a72ce0dec81d5f4df9faa57/Plugins/Flow.Launcher.Plugin.Program/Programs/Win32.cs#L644) |
+| PowerToys Run / Command Palette `1400fd8e999f381329e16e9df4084f7dc588c8a7` | 用 HashSet 比较名称、ExecutableName、FullPath，忽略大小写；.lnk 的 FullPath 会更新为目标路径，原快捷方式另存。比较键不包含参数、工作目录、窗口模式或权限。 | 同名同目标的桌面/开始菜单副本能合并；按源码推断，同名但参数不同的项也可能被合并。现有命令提示符测试保留多个入口依赖名称不同，不能据此证明保留所有参数差异。[Run 比较器](https://github.com/microsoft/PowerToys/blob/1400fd8e999f381329e16e9df4084f7dc588c8a7/src/modules/launcher/Plugins/Microsoft.Plugin.Program/Programs/Win32Program.cs#L889)、[Command Palette](https://github.com/microsoft/PowerToys/blob/1400fd8e999f381329e16e9df4084f7dc588c8a7/src/modules/cmdpal/ext/Microsoft.CmdPal.Ext.Apps/Programs/Win32Program.cs#L836)、[命令提示符测试](https://github.com/microsoft/PowerToys/blob/1400fd8e999f381329e16e9df4084f7dc588c8a7/src/modules/launcher/Plugins/Microsoft.Plugin.Program.UnitTests/Programs/Win32Tests.cs#L325) |
+| Wox Windows `20aeef60860219044a4f3cec83bdbd817a467189` | 启动键包含目标、动词、原始参数、工作目录、Show；参数大小写和空工作目录保留。用结构化编码避免字段拼接歧义，不支持的快捷方式无启动键，只按入口路径合并。排序确定代表项，用户开始菜单优先公共开始菜单、桌面等来源；其他名称进入搜索别名。 | 最接近本项目的启动语义约束。有参数/权限变体、名称别名、顺序稳定性和备用来源晋升测试。[启动键](https://github.com/Wox-launcher/Wox/blob/20aeef60860219044a4f3cec83bdbd817a467189/wox.core/util/shell/shortcut_windows.go#L25)、[合并与优先级](https://github.com/Wox-launcher/Wox/blob/20aeef60860219044a4f3cec83bdbd817a467189/wox.core/plugin/system/app/app_dedup_windows.go#L61)、[变体和别名测试](https://github.com/Wox-launcher/Wox/blob/20aeef60860219044a4f3cec83bdbd817a467189/wox.core/plugin/system/app/app_dedup_windows_test.go#L159) |
+| LaunchyQt `9041a9e06a95d36e5d24e547ac1fd831db5be950` | CatItem 相等条件为 fullPath 与 shortName；快速 Catalog 用 QSet 在加入时查重。文件扫描创建的是入口路径，并按已索引入口路径跳过重复访问。 | 可借鉴哈希查重，但仅这条规则不能合并位于不同目录的应用快捷方式。慢 Catalog 的加载行为也与快速版本不同，不能泛称全部版本都会消除重复。[相等条件](https://github.com/samsonwang/LaunchyQt/blob/9041a9e06a95d36e5d24e547ac1fd831db5be950/src/LaunchyLib/CatalogItem.cpp#L89)、[快速 Catalog](https://github.com/samsonwang/LaunchyQt/blob/9041a9e06a95d36e5d24e547ac1fd831db5be950/src/Launchy/CatalogFast.cpp#L76)、[扫描入口](https://github.com/samsonwang/LaunchyQt/blob/9041a9e06a95d36e5d24e547ac1fd831db5be950/src/Launchy/CatalogBuilder.cpp#L235) |
+
+性能结论仅为代码结构分析：哈希查重平均 O(n)，同时包含字符串长度成本；Wox 另排序以确定代表项，整体带 O(n log n) 排序成本。实际耗时还取决于快捷方式解析与 I/O，不能据复杂度给出毫秒或内存降幅。
+
+Wox 的启动键复用了其严格的启动快捷路径：还读取链接文件、检查扩展块、用 COM 取字段并检查目标 PE，只接受能理解启动数据的本地 GUI 应用。控制台、安装器、兼容层及未知元数据等回退原入口。这些额外读取有实际成本；其源清单与去重查询快照同时保留，以支持增量删除后晋升备用入口，常驻结构也较多。本项目只在启动/F5 扫描，不能直接继承这种常驻/增量设计。[保守读取范围](https://github.com/Wox-launcher/Wox/blob/20aeef60860219044a4f3cec83bdbd817a467189/wox.core/util/shell/shortcut_windows.go#L67)、[源清单与查询快照](https://github.com/Wox-launcher/Wox/blob/20aeef60860219044a4f3cec83bdbd817a467189/wox.core/plugin/system/app/app.go#L2128)
+
+PicoRun 首版建议保持同名前置条件，对可确认启动语义的普通快捷方式比较目标、原始参数、工作目录、显示模式与运行权限；特殊或不完整信息保留。复用已有 COM 对象与缓冲，一次加载取字段，HashMap 在扫描期间分组；相同组按来源优先级及路径确定代表项，可在插入时比较优先级，避免额外为查重排序。先合并再生成拼音索引，扫描后释放临时键，打开仍执行原 .lnk。读取失败回补旧索引时也必须纳入一致的保守去重规则。
+
+实际实现基于微软 [MS-SHLLINK 结构规范](https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-shllink/747629b3-b5be-452a-8101-b9a2ec49978c) 独立编写有界读取器，在同名碰撞时读取 Unicode StringData 的完整参数/工作目录、Show/标志和扩展数据，而不使用可能静默截断的固定缓冲 [GetArguments](https://learn.microsoft.com/en-us/windows/win32/api/shobjidl_core/nf-shobjidl_core-ishelllinkw-getarguments)。COM 继续检查目标，256 KiB 以上、特殊标志或不支持的扩展块保守保留；支持的属性存储/追踪/图标环境块按完整字节比较，差异不合并。补齐标准 [KnownFolderDataBlock](https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-shllink/5c7410e4-ec19-4ec5-8fff-cf4ccc46c5b6) 的完整 GUID/偏移比较后，截图中的 AB Download Manager 两项也能合并。临时共享目标池省去常见同名组的第二次 COM Load，过预算回退重读或独立保留；不把这些元数据加入常驻模型。未实现跨名称别名合并、Wox 的 PE 检查或多源增量快照。
+
+不同名称的合并可随后单独评估：参考 Wox 保留中文、英文及拼音搜索别名，增加有界的别名存储。仅同名合并已经能处理本轮截图的两组重复，无需先扩展模型或常驻源清单。实现后以 500/2000/10000 项及不同重复比例比较启动/F5 的 P50/P95、完整进程私有提交/工作集/峰值，同时检验参数大小写、工作目录、运行权限、特殊快捷方式、目录失败和备用入口，不把其他项目的核心复杂度当作本项目性能结果。
+
 ## 2026-10-04：输入模式恢复与重复入口
 
-原英文功能仅切换并备份 PicoRun 线程的 HKL，没有保存原应用焦点输入框的中文/英文模式。实际试验显示直接切英文 HKL 会影响 TSF 在原控件中的布局记忆；改为优先保留布局、临时关闭组合输入，恢复时使用原状态。外部查询/恢复使用有界标量消息，避免跨进程异步 IME 控制消息被 Windows 拒绝后遗留旧备份。两个原生进程的真实按键覆盖原先中文和英文、重复呼出及退出路径；失败尝试保留在忽略目录。截图重复源于桌面与开始菜单的不同入口路径，当前未改扫描去重语义。证据与输入法兼容边界见 [INPUT_SESSION_RESULTS.md](INPUT_SESSION_RESULTS.md)。
+原英文功能仅切换并备份 PicoRun 线程的 HKL，没有保存原应用焦点输入框的中文/英文模式。实际试验显示直接切英文 HKL 会影响 TSF 在原控件中的布局记忆；改为优先保留布局、临时关闭组合输入，恢复时使用原状态。外部查询/恢复使用有界标量消息，避免跨进程异步 IME 控制消息被 Windows 拒绝后遗留旧备份。两个原生进程的真实按键覆盖原先中文和英文、重复呼出及退出路径；失败尝试保留在忽略目录。截图重复源于桌面与开始菜单的不同入口路径，该轮尚未改扫描去重语义；后续实现见本文件上面的去重记录。证据与输入法兼容边界见 [INPUT_SESSION_RESULTS.md](INPUT_SESSION_RESULTS.md)。
 
 ## 2026-10-04：选择重绘与闪烁
 

@@ -1,4 +1,5 @@
 use super::{ffi::*, wide};
+mod dedup;
 use crate::{
     catalog::Catalog,
     model::{AppEntry, LaunchTarget},
@@ -129,6 +130,7 @@ struct ShortcutReader {
     link: ComObject,
     persist: ComObject,
     buffer: Vec<u16>,
+    metadata: Vec<u8>,
 }
 impl ShortcutReader {
     fn new() -> io::Result<Self> {
@@ -137,14 +139,15 @@ impl ShortcutReader {
             link,
             persist,
             buffer: vec![0; 32768],
+            metadata: Vec::new(),
         })
     }
-    fn is_application(&mut self, path: &Path) -> bool {
+    fn application_target(&mut self, path: &Path) -> Option<String> {
         unsafe {
             let load: unsafe extern "system" fn(*mut c_void, *const u16, u32) -> i32 =
                 std::mem::transmute(self.persist.method(5));
             if load(self.persist.0, wide(path).as_ptr(), 0) < 0 {
-                return false;
+                return None;
             }
             let get: unsafe extern "system" fn(
                 *mut c_void,
@@ -162,7 +165,7 @@ impl ShortcutReader {
                 4,
             ) < 0
             {
-                return false;
+                return None;
             }
             let len = self
                 .buffer
@@ -174,8 +177,23 @@ impl ShortcutReader {
             Path::new(&target)
                 .extension()
                 .is_some_and(|e| e.eq_ignore_ascii_case("exe"))
+                .then_some(target)
         }
     }
+}
+fn sort_entries(entries: &mut [AppEntry]) {
+    fn path(entry: &AppEntry) -> Option<&Path> {
+        match &entry.target {
+            LaunchTarget::ShellPath(path) => Some(path),
+            LaunchTarget::AppUserModelId(_) => None,
+        }
+    }
+    // The first precomputed search key is the normalized display name. No sort-time strings.
+    entries.sort_unstable_by(|a, b| {
+        a.keys[0]
+            .cmp(&b.keys[0])
+            .then_with(|| path(a).cmp(&path(b)))
+    });
 }
 pub struct Scan {
     pub entries: Vec<AppEntry>,
@@ -206,8 +224,8 @@ impl Scan {
                 }
             }
         }
-        self.entries
-            .sort_by_cached_key(|entry| entry.name.to_lowercase());
+        // Failed sources have unknown current launch metadata: retain them conservatively.
+        sort_entries(&mut self.entries);
     }
 }
 pub fn discover(roots: &[PathBuf], previous: Option<&Catalog>) -> io::Result<Scan> {
@@ -217,11 +235,18 @@ pub fn discover(roots: &[PathBuf], previous: Option<&Catalog>) -> io::Result<Sca
         ));
     }
     let mut reader = ShortcutReader::new()?;
-    let mut entries = Vec::new();
+    let mut deduper = dedup::Collector::default();
     let mut failed = Vec::new();
-    let mut stack: Vec<_> = roots.iter().map(|p| (p.clone(), 0)).collect();
+    // Known folders arrive in user Programs, common Programs, user/public Desktop order.
+    // Explicit --source roots use their supplied order. Priority travels through recursion.
+    let mut stack: Vec<_> = roots
+        .iter()
+        .enumerate()
+        .rev()
+        .map(|(priority, p)| (p.clone(), 0, priority))
+        .collect();
     let mut seen = HashSet::new();
-    while let Some((directory, depth)) = stack.pop() {
+    while let Some((directory, depth, priority)) = stack.pop() {
         let children = match fs::read_dir(&directory) {
             Ok(children) => children,
             Err(_) => {
@@ -255,7 +280,7 @@ pub fn discover(roots: &[PathBuf], previous: Option<&Catalog>) -> io::Result<Sca
             }
             if kind.is_dir() {
                 if depth < 16 {
-                    stack.push((path, depth + 1));
+                    stack.push((path, depth + 1, priority));
                 } else {
                     failed.push(path);
                 }
@@ -264,24 +289,39 @@ pub fn discover(roots: &[PathBuf], previous: Option<&Catalog>) -> io::Result<Sca
             let Some(extension) = path.extension() else {
                 continue;
             };
-            if !(extension.eq_ignore_ascii_case("exe")
-                || extension.eq_ignore_ascii_case("lnk") && reader.is_application(&path))
-            {
+            let shortcut = extension.eq_ignore_ascii_case("lnk");
+            if !shortcut && !extension.eq_ignore_ascii_case("exe") {
                 continue;
             }
+            // Skip overlapping roots before COM loads the same shortcut again.
             if !seen.insert(path.to_string_lossy().to_lowercase()) {
                 continue;
             }
+            let target = if shortcut {
+                let Some(target) = reader.application_target(&path) else {
+                    continue;
+                };
+                Some(target)
+            } else {
+                None
+            };
             let Some(name) = path.file_stem() else {
                 continue;
             };
-            entries.push(AppEntry::new(
+            deduper.insert(
                 name.to_string_lossy().into_owned(),
-                LaunchTarget::ShellPath(path),
-            ));
+                path,
+                priority,
+                target,
+                &mut reader,
+            );
         }
     }
-    entries.sort_by_cached_key(|entry| entry.name.to_lowercase());
+    drop(seen);
+    drop(reader);
+    // Release all grouping keys before allocating pinyin aliases for the survivors.
+    let mut entries = deduper.into_entries();
+    sort_entries(&mut entries);
     let mut scan = Scan { entries, failed };
     if let Some(previous) = previous {
         scan.preserve_unreadable(previous);
