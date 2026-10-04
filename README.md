@@ -123,6 +123,8 @@ The packaging script produces an installer, ZIP, checksums, and build metadata i
 
 See [installation and packaging details](docs/INSTALLATION.md) for compiler discovery, silent installation, and lifecycle verification.
 
+To package on GitHub, open **Actions → Package Windows → Run workflow**. The workflow runs only when started manually. Download **PicoRun-windows-x64** from the run's artifacts for the installer, ZIP, SHA-256 checksums, and build metadata; artifacts are retained for 30 days. See [the workflow](.github/workflows/package-windows.yml).
+
 ### Checks and engineering notes
 
 ```powershell

@@ -123,6 +123,8 @@ cargo build --release --offline --bin picorun
 
 编译器查找、静默安装和安装生命周期验证见[安装与打包说明](docs/INSTALLATION.md)。
 
+也可以在 GitHub 的 **Actions → Package Windows → Run workflow** 手动打包。该 workflow 仅在手动启动时运行；完成后从构建产物下载 **PicoRun-windows-x64**，其中包含安装包、ZIP、SHA-256 校验和及构建元数据，保留 30 天。见 [workflow 配置](.github/workflows/package-windows.yml)。
+
 ### 检查与技术文档
 
 ```powershell

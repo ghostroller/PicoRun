@@ -46,6 +46,14 @@ ZIP 仍使用系统 LocalAppData 下的 `PicoRun` 数据目录，不称为完全
 
 产物包括 `PicoRun-<版本>-windows-x64-setup.exe`、`PicoRun-<版本>-windows-x64.zip`、`PicoRun-<版本>-SHA256SUMS.txt` 和构建元数据 JSON。`dist/`、中间文件和原始验证日志均忽略，不进入源码提交。
 
+## GitHub 手动打包
+
+[Package Windows](../.github/workflows/package-windows.yml) 是唯一的 Actions workflow，只监听 `workflow_dispatch`，不由 push、PR 或 tag 自动触发。配置进入默认分支后，在 **Actions → Package Windows → Run workflow** 选择分支并运行。
+
+任务使用 `windows-2025` runner、Rust 1.95.0 MSVC 和 Inno Setup 6.7.3。Inno 编译器在 runner 上从官方固定版本下载，校验 SHA-256 后安装；项目的本地打包脚本继续保持不自动下载或安装工具。任务只调用现有 `tools/package_windows.ps1` 构建 Windows x64 安装包和 ZIP，版本来自所选分支的 `Cargo.toml`。
+
+成功后，从该次运行的 **Artifacts** 下载 `PicoRun-windows-x64`，包含上面的四种产物，保留 30 天。workflow 只有源码读取权限，不发布 GitHub Release。此任务负责构建和打包，不执行 GUI、输入法或性能验收。
+
 ## 验证与边界
 
 ```powershell
