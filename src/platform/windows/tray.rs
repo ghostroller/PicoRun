@@ -1,5 +1,6 @@
 //! A single owned notification icon; native menus exist only while open. No timers or polling.
 use super::{ffi::*, wide};
+use crate::i18n::{current, Language, Text};
 use crate::theme::ThemeMode;
 use std::{
     io,
@@ -16,6 +17,8 @@ pub(super) const EXIT: u32 = 14;
 pub(super) const ENGLISH: u32 = 15;
 pub(super) const ICONS: u32 = 16;
 pub(super) const STARTUP: u32 = 17;
+pub(super) const CHINESE_UI: u32 = 18;
+pub(super) const ENGLISH_UI: u32 = 19;
 
 pub struct Tray {
     hwnd: Hwnd,
@@ -88,11 +91,11 @@ impl Tray {
             // TaskbarCreated also uses this path: delete first makes repeated notifications idempotent.
             Shell_NotifyIconW(2, &data);
             if Shell_NotifyIconW(0, &data) == 0 {
-                return Err(io::Error::other("无法添加 PicoRun 托盘图标"));
+                return Err(io::Error::other(Text::TrayAdd));
             }
             data.version = 4;
             if Shell_NotifyIconW(4, &data) == 0 {
-                return Err(io::Error::other("无法初始化托盘图标事件"));
+                return Err(io::Error::other(Text::TrayEvents));
             }
         }
         Ok(())
@@ -112,17 +115,20 @@ impl Tray {
         let menu = Menu(handle);
         unsafe {
             for (id, label) in [
-                (SHOW, "打开 PicoRun(&O)"),
-                (REFRESH, "刷新应用索引(&R)"),
+                (SHOW, Text::Open.get(current())),
+                (REFRESH, Text::Refresh.get(current())),
                 (0, ""),
-                (LIGHT, "亮色主题(&L)"),
-                (DARK, "暗色主题(&D)"),
+                (LIGHT, Text::Light.get(current())),
+                (DARK, Text::Dark.get(current())),
                 (0, ""),
-                (ENGLISH, "呼出时使用英文输入(&E)"),
-                (ICONS, "显示应用图标(&I)"),
-                (STARTUP, "登录时启动 PicoRun(&S)"),
+                (CHINESE_UI, "简体中文(&C)"),
+                (ENGLISH_UI, "English(&G)"),
                 (0, ""),
-                (EXIT, "退出 PicoRun(&Q)"),
+                (ENGLISH, Text::EnglishInput.get(current())),
+                (ICONS, Text::Icons.get(current())),
+                (STARTUP, Text::Startup.get(current())),
+                (0, ""),
+                (EXIT, Text::Quit.get(current())),
             ] {
                 if AppendMenuW(
                     menu.0,
@@ -151,6 +157,17 @@ impl Tray {
                     LIGHT
                 } else {
                     DARK
+                },
+                0,
+            );
+            CheckMenuRadioItem(
+                menu.0,
+                CHINESE_UI,
+                ENGLISH_UI,
+                if current() == Language::Chinese {
+                    CHINESE_UI
+                } else {
+                    ENGLISH_UI
                 },
                 0,
             );

@@ -31,60 +31,71 @@ fn main() {
 
 #[cfg(windows)]
 fn native(arguments: Vec<std::ffi::OsString>) -> std::io::Result<()> {
-    use picorun::platform::windows::{run, Options};
+    use picorun::{
+        i18n::{self, Text},
+        platform::windows::{prepare_language, run, Options},
+    };
+    prepare_language(None)?;
+    let mut help = false;
     let mut options = Options::default();
     let mut args = arguments.into_iter();
-    while let Some(arg) = args.next() {
-        match arg.to_str() {
-            Some("--hidden") => options.hidden = true,
-            Some("--startup-probe") => {
-                options.startup_probe = Some(
-                    args.next()
-                        .and_then(|arg| arg.into_string().ok())
-                        .ok_or_else(|| std::io::Error::other("--startup-probe 缺少验证标识"))?,
-                );
-            }
-            Some("--icons") => {
-                options.icons = Some(
-                    match args.next().and_then(|s| s.into_string().ok()).as_deref() {
-                        Some("on") => true,
-                        Some("off") => false,
-                        _ => return Err(std::io::Error::other("--icons 需要 on 或 off")),
-                    },
-                );
-            }
-            Some("--measure-icons") => options.measure_icons = true,
-            Some("--hold-measurement-window") => options.hold_measurement_window = true,
-            Some("--theme") => {
-                options.theme = Some(
-                    args.next()
+    let parsed = (|| -> std::io::Result<()> {
+        while let Some(arg) = args.next() {
+            match arg.to_str() {
+                Some("--hidden") => options.hidden = true,
+                Some("--startup-probe") => {
+                    options.startup_probe = Some(
+                        args.next()
+                            .and_then(|arg| arg.into_string().ok())
+                            .ok_or_else(|| std::io::Error::other(Text::ArgProbe))?,
+                    );
+                }
+                Some("--icons") => {
+                    options.icons = Some(
+                        match args.next().and_then(|s| s.into_string().ok()).as_deref() {
+                            Some("on") => true,
+                            Some("off") => false,
+                            _ => return Err(std::io::Error::other(Text::ArgIcons)),
+                        },
+                    );
+                }
+                Some("--measure-icons") => options.measure_icons = true,
+                Some("--hold-measurement-window") => options.hold_measurement_window = true,
+                Some("--theme") => {
+                    options.theme = Some(
+                        args.next()
+                            .and_then(|s| s.into_string().ok())
+                            .and_then(|s| picorun::theme::ThemeMode::parse(&s))
+                            .ok_or_else(|| std::io::Error::other(Text::ArgTheme))?,
+                    );
+                }
+                Some("--hotkey") => {
+                    options.hotkey = args
+                        .next()
                         .and_then(|s| s.into_string().ok())
-                        .and_then(|s| picorun::theme::ThemeMode::parse(&s))
-                        .ok_or_else(|| std::io::Error::other("--theme 需要 light 或 dark"))?,
-                );
+                        .ok_or_else(|| std::io::Error::other(Text::ArgHotkey))?
+                }
+                Some("--data-dir") => {
+                    options.data_dir = Some(PathBuf::from(
+                        args.next()
+                            .ok_or_else(|| std::io::Error::other(Text::ArgData))?,
+                    ))
+                }
+                Some("--source") => options.sources.push(PathBuf::from(
+                    args.next()
+                        .ok_or_else(|| std::io::Error::other(Text::ArgSource))?,
+                )),
+                Some("--help") => help = true,
+                _ => return Err(std::io::Error::other(Text::ArgUnknown)),
             }
-            Some("--hotkey") => {
-                options.hotkey = args
-                    .next()
-                    .and_then(|s| s.into_string().ok())
-                    .ok_or_else(|| std::io::Error::other("--hotkey 缺少热键"))?
-            }
-            Some("--data-dir") => {
-                options.data_dir =
-                    Some(PathBuf::from(args.next().ok_or_else(|| {
-                        std::io::Error::other("--data-dir 缺少目录")
-                    })?))
-            }
-            Some("--source") => options.sources.push(PathBuf::from(
-                args.next()
-                    .ok_or_else(|| std::io::Error::other("--source 缺少目录"))?,
-            )),
-            Some("--help") => {
-                picorun::platform::windows::error_box("直接运行打开窗口。Alt+Space 呼出/隐藏，↑↓ 选择，Enter 打开，Esc 隐藏，F5 刷新，Ctrl+Q 退出。托盘右键可刷新、切换主题、英文输入、应用图标、登录自启动和退出。\n选项：--hidden、--theme light|dark、--icons on|off（本次启动覆盖）、--hotkey Ctrl+Alt+P、--data-dir <数据目录>、--source <应用入口目录>（可重复；替代系统目录）。");
-                return Ok(());
-            }
-            _ => return Err(std::io::Error::other("未知选项；使用 --help 查看说明")),
         }
+        Ok(())
+    })();
+    prepare_language(options.data_dir.as_deref())?;
+    parsed?;
+    if help {
+        picorun::platform::windows::error_box(Text::Usage.get(i18n::current()));
+        return Ok(());
     }
     run(options)
 }

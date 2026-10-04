@@ -139,6 +139,28 @@ pub(super) unsafe fn message(hwnd: Hwnd, msg: u32, wp: usize) -> Option<isize> {
             UpdateWindow(hwnd);
             1
         }
+        0x800e => {
+            // Scalar hashes avoid cross-process pointers. Available only with --measure-icons.
+            fn hash(units: impl Iterator<Item = u16>) -> isize {
+                units.fold(2166136261u32, |value, unit| {
+                    (value ^ u32::from(unit)).wrapping_mul(16777619)
+                }) as isize
+            }
+            match wp {
+                0 => isize::from(i18n::current() == Language::English),
+                1 => hash(view()?.status.iter().copied()),
+                2 => hash(view()?.help.iter().copied().take_while(|unit| *unit != 0)),
+                3 => hash(view()?.empty.iter().copied().take_while(|unit| *unit != 0)),
+                4 => hash(
+                    view()?
+                        .rows
+                        .iter()
+                        .flat_map(|row| row.iter().copied().chain(Some(0))),
+                ),
+                5 => hash(view()?.cue.iter().copied().take_while(|unit| *unit != 0)),
+                _ => 0,
+            }
+        }
         _ => return None,
     })
 }

@@ -1,6 +1,7 @@
 //! GDI renderer. Snapshot data and Theme are independent of search and Win32 input.
 use crate::platform::windows::icons::Icon;
 use crate::{
+    i18n::{Language, Text},
     platform::windows::{ffi::*, wide},
     theme::{Rgb, Theme},
 };
@@ -10,13 +11,37 @@ mod row_buffer;
 use edit_buffer::EditBuffer;
 use row_buffer::RowBuffer;
 
-#[derive(Clone, Default)]
+#[derive(Clone)]
 pub struct View {
     pub rows: Rc<[Vec<u16>]>,
     pub selected: Option<usize>,
     pub status: Rc<[u16]>,
+    pub help: Rc<[u16]>,
+    pub empty: Rc<[u16]>,
+    pub cue: Rc<[u16]>,
     pub show_icons: bool,
     pub icons: Rc<[Option<Arc<Icon>>]>,
+}
+impl Default for View {
+    fn default() -> Self {
+        Self {
+            rows: Rc::default(),
+            selected: None,
+            status: Rc::default(),
+            help: wide(Text::Help.get(crate::i18n::current())).into(),
+            empty: wide(Text::Empty.get(crate::i18n::current())).into(),
+            cue: wide(Text::Cue.get(crate::i18n::current())).into(),
+            show_icons: false,
+            icons: Rc::default(),
+        }
+    }
+}
+impl View {
+    pub fn set_language(&mut self, language: Language) {
+        self.help = wide(Text::Help.get(language)).into();
+        self.empty = wide(Text::Empty.get(language)).into();
+        self.cue = wide(Text::Cue.get(language)).into();
+    }
 }
 pub struct Renderer {
     pub theme: Theme,
@@ -24,8 +49,6 @@ pub struct Renderer {
     pub font: Handle,
     pub background: Handle,
     selection: Handle,
-    help: Vec<u16>,
-    empty: Vec<u16>,
     row_buffer: Cell<Option<RowBuffer>>,
     edit_buffer: Cell<Option<EditBuffer>>,
 }
@@ -43,8 +66,6 @@ impl Renderer {
             font: std::ptr::null_mut(),
             background: std::ptr::null_mut(),
             selection: std::ptr::null_mut(),
-            help: wide("↑↓ 选择   Enter 打开   Esc 隐藏   F5 刷新   Ctrl+Q 退出"),
-            empty: wide("没有匹配的应用"),
             row_buffer: Cell::new(None),
             edit_buffer: Cell::new(None),
         };
@@ -118,8 +139,46 @@ impl Renderer {
     }
     /// Keep native Edit layout/selection intact and recolor its selection pixels locally.
     /// Native painting remains the fallback while composing or when allocation fails.
-    pub fn paint_edit(&self, hwnd: Hwnd, proc: Option<WndProc>, print: Option<Handle>) -> bool {
+    pub fn paint_edit(
+        &self,
+        hwnd: Hwnd,
+        proc: Option<WndProc>,
+        print: Option<Handle>,
+        cue: &[u16],
+    ) -> bool {
         unsafe {
+            if CallWindowProcW(proc, hwnd, 0xe, 0, 0) == 0 && !cue.is_empty() {
+                // Plain Edit without Comctl32 v6 does not support EM_SETCUEBANNER.
+                // Draw only a hint over its empty native surface; text/caret/IME remain native.
+                // The caller excludes active composition and owns the cached cue across calls.
+                self.release_edit_buffer();
+                let hidden_caret = print.is_none() && HideCaret(hwnd) != 0;
+                let mut paint = Paint::default();
+                let dc = print.unwrap_or_else(|| BeginPaint(hwnd, &mut paint));
+                CallWindowProcW(proc, hwnd, 0x318, dc as usize, 0xc);
+                let mut text = Rect::default();
+                SendMessageW(hwnd, 0xb2, 0, &mut text as *mut Rect as isize); // EM_GETRECT.
+                let previous = SelectObject(dc, self.font);
+                let previous_color = SetTextColor(dc, color(self.theme.muted));
+                let previous_mode = SetBkMode(dc, 1);
+                DrawTextW(
+                    dc,
+                    cue.as_ptr(),
+                    (cue.len() - 1) as i32,
+                    &mut text,
+                    0x20 | 4 | 0x800 | 0x8000,
+                );
+                SetBkMode(dc, previous_mode);
+                SetTextColor(dc, previous_color);
+                SelectObject(dc, previous);
+                if print.is_none() {
+                    EndPaint(hwnd, &paint);
+                }
+                if hidden_caret {
+                    ShowCaret(hwnd);
+                }
+                return true;
+            }
             let selection = SendMessageW(hwnd, 0xb0, 0, 0) as u32;
             if GetFocus() != hwnd || selection & 0xffff == selection >> 16 {
                 self.release_edit_buffer();
@@ -302,7 +361,7 @@ impl Renderer {
         status.top = client.bottom - self.scale(28);
         status.bottom = client.bottom - self.scale(5);
         if overlaps(&dirty, &status) {
-            DrawTextW(dc, self.help.as_ptr(), -1, &mut status, 0x20 | 4 | 0x800);
+            DrawTextW(dc, view.help.as_ptr(), -1, &mut status, 0x20 | 4 | 0x800);
         }
         SelectObject(dc, previous_font);
     }
@@ -347,7 +406,7 @@ impl Renderer {
                 );
             } else {
                 SetTextColor(dc, color(self.theme.muted));
-                DrawTextW(dc, self.empty.as_ptr(), -1, &mut text, 0x20 | 4 | 0x800);
+                DrawTextW(dc, view.empty.as_ptr(), -1, &mut text, 0x20 | 4 | 0x800);
             }
         }
     }
@@ -416,6 +475,35 @@ impl Drop for Renderer {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn both_languages_fit_the_footer_at_supported_dpi() {
+        for dpi in [96, 120, 168, 192] {
+            let renderer = Renderer::new(Theme::default(), dpi).unwrap();
+            unsafe {
+                let dc = CreateCompatibleDC(std::ptr::null_mut());
+                assert!(!dc.is_null());
+                let previous = SelectObject(dc, renderer.font);
+                for language in [Language::Chinese, Language::English] {
+                    let text = wide(Text::Help.get(language));
+                    let mut rect = Rect::default();
+                    DrawTextW(
+                        dc,
+                        text.as_ptr(),
+                        (text.len() - 1) as i32,
+                        &mut rect,
+                        0x400 | 0x20 | 0x800,
+                    );
+                    assert!(
+                        rect.right
+                            <= renderer.scale(renderer.theme.width - 2 * renderer.theme.padding),
+                        "footer clipped: {language:?} at {dpi} DPI"
+                    );
+                }
+                SelectObject(dc, previous);
+                DeleteDC(dc);
+            }
+        }
+    }
     #[test]
     fn input_anchor_is_independent_of_result_count_and_monitor_origin() {
         for dpi in [96, 168, 192] {

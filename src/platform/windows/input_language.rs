@@ -1,5 +1,6 @@
 //! English only during an input session. No layouts are installed or unloaded.
 use super::ffi::*;
+use crate::i18n::Text;
 use std::{cell::Cell, io, ptr::null_mut};
 
 #[derive(Clone, Copy)]
@@ -173,7 +174,7 @@ pub fn begin(window: Hwnd, edit: Hwnd) -> io::Result<()> {
     } else {
         let count = unsafe { GetKeyboardLayoutList(0, null_mut()) };
         if !(1..=1024).contains(&count) {
-            return Err(io::Error::other("无法读取可用的键盘布局"));
+            return Err(io::Error::other(Text::LayoutRead));
         }
         let mut layouts = vec![null_mut(); count as usize];
         let copied = unsafe { GetKeyboardLayoutList(count, layouts.as_mut_ptr()) };
@@ -181,7 +182,7 @@ pub fn begin(window: Hwnd, edit: Hwnd) -> io::Result<()> {
             .iter()
             .copied()
             .find(|&layout| english(layout))
-            .ok_or_else(|| io::Error::other("未找到可用的英文键盘布局"))?
+            .ok_or_else(|| io::Error::other(Text::LayoutEnglish))?
     };
     // Publish before this reentrant call. Flags=0 affects our thread only.
     if target != current && unsafe { ActivateKeyboardLayout(target, 0) }.is_null() {
@@ -218,8 +219,8 @@ fn restore_session(previous: Session) -> io::Result<()> {
 }
 fn restore_mode(previous: Session) -> io::Result<()> {
     if let Some(mode) = previous.mode {
-        let context = Context::get(previous.edit)
-            .ok_or_else(|| io::Error::other("原生输入框的输入法上下文已失效"))?;
+        let context =
+            Context::get(previous.edit).ok_or_else(|| io::Error::other(Text::EditContext))?;
         let current = context.mode();
         // Some TSF IMEs derive their open state from IME_CMODE_NATIVE. Restoring
         // a stale native flag in a closed context can reopen it asynchronously.
@@ -228,13 +229,13 @@ fn restore_mode(previous: Session) -> io::Result<()> {
             if current.conversion != mode.conversion
                 && unsafe { ImmSetConversionStatus(context.handle, conversion, sentence) } == 0
             {
-                return Err(io::Error::other("输入法转换模式恢复失败"));
+                return Err(io::Error::other(Text::ConversionRestore));
             }
         }
         // Apply the open state last, even when the old readback already matches:
         // conversion changes may notify TSF asynchronously.
         if unsafe { ImmSetOpenStatus(context.handle, i32::from(mode.open)) } == 0 {
-            return Err(io::Error::other("输入法中英文模式恢复失败"));
+            return Err(io::Error::other(Text::ImeRestore));
         }
     }
     Ok(())
@@ -256,24 +257,24 @@ fn restore_origin(previous: Session) -> io::Result<()> {
         if GetKeyboardLayout(origin.thread) != previous.layout
             && PostMessageW(origin.window, 0x50, 0, previous.layout as isize) == 0
         {
-            return Err(io::Error::other("原窗口的输入布局恢复请求失败"));
+            return Err(io::Error::other(Text::OriginalLayout));
         }
         let Some(mode) = previous.mode else {
             return Ok(());
         };
         let ime = ImmGetDefaultIMEWnd(origin.window);
         if ime.is_null() {
-            return Err(io::Error::other("原窗口的输入法上下文已失效"));
+            return Err(io::Error::other(Text::OriginalContext));
         }
         if let Some((conversion, sentence)) = mode.conversion.filter(|_| mode.open) {
             if ime_message(ime, 2, conversion as isize).is_none()
                 || ime_message(ime, 4, sentence as isize).is_none()
             {
-                return Err(io::Error::other("原窗口的输入法转换模式恢复请求失败"));
+                return Err(io::Error::other(Text::OriginalConversion));
             }
         }
         if ime_message(ime, 6, isize::from(mode.open)).is_none() {
-            return Err(io::Error::other("原窗口的输入法中英文模式恢复请求失败"));
+            return Err(io::Error::other(Text::OriginalIme));
         }
     }
     Ok(())

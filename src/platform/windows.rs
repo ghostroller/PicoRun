@@ -1,4 +1,5 @@
 //! Native system boundary; no discovery or Shell calls occur on the search path.
+use crate::i18n::Text;
 mod discovery;
 pub mod ffi;
 pub(crate) mod icons;
@@ -26,6 +27,15 @@ pub fn replace_file(source: &Path, destination: &Path) -> io::Result<()> {
     } else {
         Ok(())
     }
+}
+/// Load the persisted UI language before startup errors or --help are displayed.
+pub fn prepare_language(data_dir: Option<&Path>) -> io::Result<()> {
+    let data = match data_dir {
+        Some(path) => path.to_path_buf(),
+        None => discovery::data_directory()?,
+    };
+    crate::i18n::set(settings::load_language(&data.join("language.txt")));
+    Ok(())
 }
 pub fn error_box(message: &str) {
     unsafe {
@@ -70,15 +80,15 @@ impl Hotkey {
                 value if value.starts_with('F') && key.is_none() => {
                     let n = value[1..].parse::<u32>().unwrap_or(0);
                     if !(1..=24).contains(&n) {
-                        return Err(io::Error::other("热键功能键应为 F1–F24"));
+                        return Err(io::Error::other(Text::HotkeyFunction));
                     }
                     key = Some(0x6f + n);
                 }
-                _ => return Err(io::Error::other("热键格式例如 Alt+Space 或 Ctrl+Alt+P")),
+                _ => return Err(io::Error::other(Text::HotkeyFormat)),
             }
         }
         if modifiers == 0 || key.is_none() {
-            return Err(io::Error::other("热键需要修饰键和一个按键"));
+            return Err(io::Error::other(Text::HotkeyMissing));
         }
         Ok(Self {
             modifiers: modifiers | 0x4000,

@@ -1,4 +1,5 @@
 use super::{ffi::*, wide};
+use crate::i18n::Text;
 mod dedup;
 use crate::{
     catalog::Catalog,
@@ -43,7 +44,7 @@ pub fn known_folder(id: &Guid) -> io::Result<PathBuf> {
     let mut ptr = null_mut();
     unsafe {
         if SHGetKnownFolderPath(id, 0, null_mut(), &mut ptr) < 0 {
-            return Err(io::Error::other("无法读取系统已知目录"));
+            return Err(io::Error::other(Text::KnownFolders));
         }
         let mut len = 0;
         while *ptr.add(len) != 0 {
@@ -114,14 +115,14 @@ pub(super) fn shell_link() -> io::Result<(ComObject, ComObject)> {
     unsafe {
         let mut object = null_mut();
         if CoCreateInstance(&SHELL_LINK, null_mut(), 1, &SHELL_LINK_W, &mut object) < 0 {
-            return Err(io::Error::other("无法创建 Shell Link"));
+            return Err(io::Error::other(Text::LinkCreate));
         }
         let link = ComObject(object);
         let query: unsafe extern "system" fn(*mut c_void, *const Guid, *mut *mut c_void) -> i32 =
             std::mem::transmute(link.method(0));
         let mut persist = null_mut();
         if query(link.0, &PERSIST_FILE, &mut persist) < 0 {
-            return Err(io::Error::other("无法读取 Shell Link"));
+            return Err(io::Error::other(Text::LinkRead));
         }
         Ok((link, ComObject(persist)))
     }
@@ -230,9 +231,7 @@ impl Scan {
 }
 pub fn discover(roots: &[PathBuf], previous: Option<&Catalog>) -> io::Result<Scan> {
     if roots.is_empty() {
-        return Err(io::Error::other(
-            "无法确定应用目录；保留原有索引，可按 F5 重试",
-        ));
+        return Err(io::Error::other(Text::RootsMissing));
     }
     let mut reader = ShortcutReader::new()?;
     let mut deduper = dedup::Collector::default();
@@ -328,20 +327,17 @@ pub fn discover(roots: &[PathBuf], previous: Option<&Catalog>) -> io::Result<Sca
     }
     let Scan { entries, failed } = scan;
     if !roots.is_empty() && roots.iter().all(|root| failed.contains(root)) && entries.is_empty() {
-        return Err(io::Error::other("所有应用目录均无法读取；保留原有索引"));
+        return Err(io::Error::other(Text::RootsUnreadable));
     }
     Ok(Scan { entries, failed })
 }
 
 pub fn launch(hwnd: Hwnd, target: &LaunchTarget) -> io::Result<()> {
     let LaunchTarget::ShellPath(path) = target else {
-        return Err(io::Error::other("此版本尚未支持 Store/UWP 应用"));
+        return Err(io::Error::other(Text::UwpUnsupported));
     };
     if !path.is_file() {
-        return Err(io::Error::new(
-            io::ErrorKind::NotFound,
-            "入口已失效，请按 F5 刷新索引",
-        ));
+        return Err(io::Error::new(io::ErrorKind::NotFound, Text::EntryMissing));
     }
     // No .lnk parameter or working-directory overrides.
     let file = wide(path);
@@ -365,10 +361,9 @@ pub fn launch(hwnd: Hwnd, target: &LaunchTarget) -> io::Result<()> {
         process: null_mut(),
     };
     if unsafe { ShellExecuteExW(&mut info) } == 0 {
-        Err(io::Error::other(format!(
-            "打开失败（Windows 错误 {}），可按 F5 刷新",
-            unsafe { GetLastError() }
-        )))
+        Err(io::Error::other(crate::i18n::Failure::Launch(unsafe {
+            GetLastError()
+        })))
     } else {
         Ok(())
     }

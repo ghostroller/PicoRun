@@ -7,6 +7,7 @@ mod flicker_probe;
 mod icons_probe;
 mod ime_probe;
 mod input_session_probe;
+mod language_probe;
 mod mouse_probe;
 mod startup_probe;
 use super::{discovery, ffi::*, tray, wide};
@@ -575,6 +576,9 @@ pub fn run() -> io::Result<()> {
     }
     if args.first().is_some_and(|a| a == "--input-session") {
         return input_session_probe::run();
+    }
+    if args.first().is_some_and(|a| a == "--language") {
+        return language_probe::run();
     }
     let real = args.iter().any(|a| a == "--real");
     let baseline = args.iter().any(|a| a == "--baseline");

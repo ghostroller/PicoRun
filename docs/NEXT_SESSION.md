@@ -1,5 +1,9 @@
 # 新会话任务
 
+2026-10-05 i18n 补充：托盘提供简体中文/English 两项单选，语言即时切换并独立保存。默认简体中文，安装器语言独立。保持应用名称、搜索输入、选择、位置和输入模式不变；不要重新引入查询时翻译/读盘或语言切换时扫描索引。新探针为 `native_probe.exe --language`。见 [I18N_RESULTS.md](I18N_RESULTS.md)。
+
+2026-10-05 打包补充：已有 `tools/package_windows.ps1` 和 Inno 源文件，可生成 x64 安装包、ZIP、校验和与构建元数据。不要把安装/网络更新逻辑加入常驻主程序，不改固定 AppId。安装不注册自启动，卸载保留用户数据并只删除指向本安装目录的注册。`tools/verify_windows_package.ps1` 使用唯一 AppId、非 Run 测试项与真实安装器验证生命周期；运行前正常退出现有 PicoRun，验证后恢复原状态。Windows 10、主程序版本资源、品牌图标、签名和整体发布许可证仍待确认。见 [INSTALLATION.md](INSTALLATION.md)。
+
 2026-10-04 拖选闪烁补充：此前的静态选区截图漏掉了原生 Edit 直接画蓝色后再覆盖灰色的中间帧。现在在普通选择/编辑消息处理期间裁剪该 Edit 的临时窗口 DC，再发布一次缓冲重绘；不改变可见标记，原生文本、选择和滚动继续工作。回归必须含 `native_probe.exe --edit-drag` 的并行屏幕采样，不能只检查拖动结束截图。验证见 [EDIT_DRAG_RESULTS.md](EDIT_DRAG_RESULTS.md)。
 
 2026-10-04 呼出位置与选区补充：输入框以最大结果面板高度定位，结果区向下伸缩；不要重新用当前结果高度居中导致每次呼出跳动。原生 Edit 保留处理编辑与 IME，普通文本选区采用有界的原生绘制表面局部调色，亮暗主题各为柔和灰色；资源在取消选择/开始组字/隐藏释放。验收见 [APPEARANCE_RESULTS.md](APPEARANCE_RESULTS.md)。

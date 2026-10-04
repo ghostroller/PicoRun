@@ -6,6 +6,7 @@ mod diagnostics;
 use crate::{
     cache,
     catalog::Catalog,
+    i18n::{self, Language, Notice, Text},
     theme::ThemeMode,
     ui::{
         controller::Controller,
@@ -65,7 +66,9 @@ struct Runtime {
     tray: Option<Rc<tray::Tray>>,
     roots: Vec<PathBuf>,
     cache: PathBuf,
-    status: String,
+    status: Notice,
+    status_dirty: bool,
+    language_settings: PathBuf,
     text_buffer: Vec<u16>,
     text: String,
     refreshing: bool,
@@ -124,8 +127,9 @@ fn view() -> Option<View> {
             s.view_dirty = false;
         }
         s.view.selected = s.controller.selected_index();
-        if !s.status.encode_utf16().eq(s.view.status.iter().copied()) {
-            s.view.status = s.status.encode_utf16().collect();
+        if s.status_dirty {
+            s.view.status = s.status.to_string().encode_utf16().collect();
+            s.status_dirty = false;
         }
         s.view.clone()
     })
@@ -189,7 +193,7 @@ fn request_icons() {
         Err(error) => {
             drop(session);
             set_icons(false);
-            report(format!("图标加载失败：{error}"));
+            report(Notice::error(Text::IconLoad, error));
         }
     }
 }
@@ -209,7 +213,7 @@ fn toggle_icons() {
     };
     set_icons(enabled);
     if settings::save_toggle(&path, enabled).is_err() {
-        report("应用图标选项保存失败；重启后可能恢复原设置");
+        report(Text::IconSave);
     }
 }
 fn invalidate_icons() {
@@ -265,7 +269,7 @@ fn show() {
     }
     if state(|s| s.start_english).unwrap_or(false) {
         if let Err(error) = input_language::remember(hwnd, EDIT.get(), true) {
-            report(format!("输入模式备份失败：{error}"));
+            report(Notice::error(Text::InputBackup, error));
         }
     }
     unsafe {
@@ -315,7 +319,7 @@ fn show() {
         SetFocus(EDIT.get());
         if state(|s| s.start_english).unwrap_or(false) && IsWindowVisible(hwnd) != 0 {
             if let Err(error) = input_language::begin(hwnd, EDIT.get()) {
-                report(format!("英文输入切换失败：{error}"));
+                report(Notice::error(Text::InputEnglish, error));
             }
         }
         SendMessageW(EDIT.get(), 0xb1, 0, -1);
@@ -328,7 +332,7 @@ fn hide() {
     // Restore while Edit still has its input context. Restoring after focus loss can leave
     // TSF remembering the English layout and selecting it again on the next invocation.
     if let Err(error) = input_language::restore() {
-        report(format!("输入模式恢复失败：{error}"));
+        report(Notice::error(Text::InputRestore, error));
     }
     unsafe {
         ShowWindow(WINDOW.get(), 0);
@@ -341,7 +345,7 @@ fn hide() {
 fn close() {
     cancel_composition();
     if let Err(error) = input_language::restore() {
-        report(format!("输入模式恢复失败：{error}"));
+        report(Notice::error(Text::InputRestore, error));
     }
     unsafe { DestroyWindow(WINDOW.get()) };
 }
@@ -413,7 +417,10 @@ fn activate() {
     let Some(target) = target else { return };
     hide();
     if let Err(error) = discovery::launch(WINDOW.get(), &target) {
-        state(|s| s.status = error.to_string());
+        state(|s| {
+            s.status = error.into();
+            s.status_dirty = true;
+        });
         // Keep the failing query available for correction without changing its selection.
         if state(|s| s.start_english).unwrap_or(false) {
             let _ = input_language::remember(WINDOW.get(), EDIT.get(), true);
@@ -432,7 +439,8 @@ fn refresh() {
             return None;
         }
         s.refreshing = true;
-        s.status = "正在刷新应用索引…".into();
+        s.status = Text::Refreshing.into();
+        s.status_dirty = true;
         Some((s.roots.clone(), s.cache.clone(), s.system_sources))
     })
     .flatten() else {
@@ -458,24 +466,26 @@ fn refresh() {
             let catalog = Catalog::new(scan.entries);
             let count = catalog.entries().len();
             let saved = cache::save(&path, &catalog);
-            let status = match saved {
-                Ok(()) => format!(
-                    "{count} 个应用 · 刷新完成 · {} 个目录读取失败",
-                    scan.failed.len() + unavailable
-                ),
-                Err(_) => format!("{count} 个应用 · 缓存保存失败，本次索引仍可用"),
+            let status = Notice::Catalog {
+                count,
+                failed: scan.failed.len() + unavailable,
+                refreshed: true,
+                cache_failed: saved.is_err(),
+                source: None,
             };
             state(|s| {
                 s.controller.replace_catalog(catalog);
                 s.view_dirty = true;
                 s.roots = roots;
                 s.status = status;
+                s.status_dirty = true;
                 s.refreshing = false;
             });
         }
         Err(error) => {
             state(|s| {
-                s.status = error.to_string();
+                s.status = error.into();
+                s.status_dirty = true;
                 s.refreshing = false;
             });
         }
@@ -484,8 +494,11 @@ fn refresh() {
     sync_query();
     repaint(true);
 }
-fn report(error: impl std::fmt::Display) {
-    state(|s| s.status = error.to_string());
+fn report(notice: impl Into<Notice>) {
+    state(|s| {
+        s.status = notice.into();
+        s.status_dirty = true;
+    });
     repaint(false);
 }
 fn change_theme(mode: ThemeMode) {
@@ -495,7 +508,7 @@ fn change_theme(mode: ThemeMode) {
     };
     if current == mode {
         if settings::save(&path, mode).is_err() {
-            report("主题保存失败；重启后可能恢复原主题");
+            report(Text::ThemeSave);
         }
         return;
     }
@@ -514,12 +527,30 @@ fn change_theme(mode: ThemeMode) {
             }
             drop(previous);
             if settings::save(&path, mode).is_err() {
-                report("主题已切换，但保存失败；重启后可能恢复原主题");
+                report(Text::ThemeChangedSave);
             }
             repaint(false);
         }
-        Err(error) => report(format!("主题切换失败：{error}")),
+        Err(error) => report(Notice::error(Text::ThemeChange, error)),
     }
+}
+fn change_language(language: Language) {
+    let Some(path) = state(|s| {
+        i18n::set(language);
+        s.view.set_language(language);
+        s.status_dirty = true;
+        s.language_settings.clone()
+    }) else {
+        return;
+    };
+    // Only the cached UI text changes. No Runtime borrow survives native invalidation.
+    unsafe {
+        InvalidateRect(EDIT.get(), null(), 1);
+    }
+    if settings::save_language(&path, language).is_err() {
+        report(Text::LanguageSave);
+    }
+    repaint(false);
 }
 fn toggle_english() {
     let Some((enabled, path)) = state(|s| {
@@ -535,10 +566,10 @@ fn toggle_english() {
         input_language::restore()
     };
     if let Err(error) = result {
-        report(format!("输入模式切换失败：{error}"));
+        report(Notice::error(Text::InputChange, error));
     }
     if settings::save_english(&path, enabled).is_err() {
-        report("英文输入选项保存失败；重启后可能恢复原设置");
+        report(Text::InputSave);
     }
 }
 fn toggle_startup() {
@@ -550,9 +581,9 @@ fn toggle_startup() {
         registration.set(!enabled)?;
         Ok(!enabled)
     }) {
-        Ok(true) => report("已启用登录自启动（隐藏到托盘）"),
-        Ok(false) => report("已关闭登录自启动"),
-        Err(error) => report(format!("自启动设置失败：{error}")),
+        Ok(true) => report(Text::StartupOn),
+        Ok(false) => report(Text::StartupOff),
+        Err(error) => report(Notice::error(Text::StartupChange, error)),
     }
 }
 fn tray_command(command: u32) {
@@ -564,6 +595,8 @@ fn tray_command(command: u32) {
         tray::ENGLISH => toggle_english(),
         tray::ICONS => toggle_icons(),
         tray::STARTUP => toggle_startup(),
+        tray::CHINESE_UI => change_language(Language::Chinese),
+        tray::ENGLISH_UI => change_language(Language::English),
         tray::EXIT => close(),
         _ => {}
     }
@@ -615,11 +648,12 @@ unsafe extern "system" fn edit_proc(hwnd: Hwnd, msg: u32, wp: usize, lp: isize) 
             return 0;
         }
         0xf | 0x318 if !is_composing() => {
-            if let Some(renderer) = renderer() {
+            if let (Some(renderer), Some(cue)) = (renderer(), state(|s| Rc::clone(&s.view.cue))) {
                 if renderer.paint_edit(
                     hwnd,
                     EDIT_PROC.get(),
                     (msg == 0x318).then_some(wp as Handle),
+                    &cue,
                 ) {
                     return 0;
                 }
@@ -632,7 +666,7 @@ unsafe extern "system" fn edit_proc(hwnd: Hwnd, msg: u32, wp: usize, lp: isize) 
                 && GetForegroundWindow() == WINDOW.get()
             {
                 if let Err(error) = input_language::begin(WINDOW.get(), hwnd) {
-                    report(format!("英文输入切换失败：{error}"));
+                    report(Notice::error(Text::InputEnglish, error));
                 }
             }
             return result;
@@ -667,7 +701,7 @@ unsafe extern "system" fn edit_proc(hwnd: Hwnd, msg: u32, wp: usize, lp: isize) 
         0x101 | 0x291 => update_ime(|s| s.key_up(wp as u32)),
         0x8 => {
             if let Err(error) = input_language::restore() {
-                report(format!("输入模式恢复失败：{error}"));
+                report(Notice::error(Text::InputRestore, error));
             }
             let result = CallWindowProcW(EDIT_PROC.get(), hwnd, msg, wp, lp);
             IME.set(ime::State::EMPTY); // No stale state after focus loss/cancel or a missed end notification.
@@ -734,7 +768,10 @@ unsafe extern "system" fn window_proc(hwnd: Hwnd, msg: u32, wp: usize, lp: isize
                 if result.failed {
                     drop(session);
                     set_icons(false);
-                    report("图标加载失败：无法初始化 Shell COM");
+                    report(Notice::error(
+                        Text::IconLoad,
+                        io::Error::other(Text::ShellCom),
+                    ));
                 } else {
                     let previous =
                         state(|s| std::mem::replace(&mut s.view.icons, result.icons.into()));
@@ -786,12 +823,6 @@ unsafe extern "system" fn window_proc(hwnd: Hwnd, msg: u32, wp: usize, lp: isize
             if let Some(renderer) = renderer() {
                 SendMessageW(edit, 0x30, renderer.font as usize, 1);
             }
-            SendMessageW(
-                edit,
-                0x1501,
-                0,
-                wide("搜索应用 / 拼音 / 首字母").as_ptr() as isize,
-            );
             return 0;
         }
         0x111 if (wp >> 16) & 0xffff == 0x300 && lp == EDIT.get() as isize => {
@@ -829,7 +860,7 @@ unsafe extern "system" fn window_proc(hwnd: Hwnd, msg: u32, wp: usize, lp: isize
                         let startup_enabled = match startup.enabled() {
                             Ok(enabled) => enabled,
                             Err(error) => {
-                                report(format!("读取自启动状态失败：{error}"));
+                                report(Notice::error(Text::StartupRead, error));
                                 false
                             }
                         };
@@ -1044,6 +1075,7 @@ fn dpi(hwnd: Hwnd) -> u32 {
     }
 }
 pub fn run(options: Options) -> io::Result<()> {
+    super::prepare_language(options.data_dir.as_deref())?;
     let hotkey = Hotkey::parse(&options.hotkey)?;
     unsafe {
         let handle = CreateMutexW(null(), 0, wide("Local\\PicoRun.Native.v1").as_ptr());
@@ -1060,7 +1092,7 @@ pub fn run(options: Options) -> io::Result<()> {
             return Ok(());
         }
         if CoInitializeEx(null_mut(), 2) < 0 {
-            return Err(io::Error::other("无法初始化 Shell COM"));
+            return Err(io::Error::other(Text::ShellCom));
         }
         let _com = Com;
         enable_dpi();
@@ -1069,6 +1101,7 @@ pub fn run(options: Options) -> io::Result<()> {
             .data_dir
             .map(Ok)
             .unwrap_or_else(discovery::data_directory)?;
+        let language_settings = data.join("language.txt");
         let path = data.join("apps-v1.bin");
         let settings_path = data.join("theme.txt");
         let input_settings = data.join("english-input.txt");
@@ -1088,27 +1121,32 @@ pub fn run(options: Options) -> io::Result<()> {
         };
         let mut cached = cache::load(&path).ok();
         let scan = discovery::discover(&roots, cached.as_ref());
-        let (catalog, mut status) = match scan {
+        let (catalog, failed, source) = match scan {
             Ok(scan) => (
                 Catalog::new(scan.entries),
-                format!("{} 个目录读取失败", scan.failed.len() + unavailable),
+                scan.failed.len() + unavailable,
+                None,
             ),
-            Err(error) => (cached.take().unwrap_or_default(), error.to_string()),
+            Err(error) => (cached.take().unwrap_or_default(), 0, Some(error)),
         };
-        drop(cached); // A successfully refreshed index no longer needs the startup fallback snapshot.
-        if cache::save(&path, &catalog).is_err() {
-            status.push_str(" · 缓存保存失败");
-        }
-        status = format!("{} 个应用 · {status}", catalog.entries().len());
+        drop(cached); // Release the startup fallback after successful discovery.
+        let status = Notice::Catalog {
+            count: catalog.entries().len(),
+            failed,
+            refreshed: false,
+            cache_failed: cache::save(&path, &catalog).is_err(),
+            source,
+        };
+        let initial_view = View {
+            show_icons,
+            ..View::default()
+        };
         let initial_renderer = Rc::new(Renderer::new(mode.theme(), 96)?);
         STATE.with(|s| {
             *s.borrow_mut() = Some(Runtime {
                 controller: Controller::new(catalog),
                 renderer: initial_renderer,
-                view: View {
-                    show_icons,
-                    ..View::default()
-                },
+                view: initial_view,
                 view_dirty: true,
                 theme_mode: mode,
                 settings: settings_path,
@@ -1119,6 +1157,8 @@ pub fn run(options: Options) -> io::Result<()> {
                 roots,
                 cache: path,
                 status,
+                status_dirty: true,
+                language_settings,
                 text_buffer: Vec::with_capacity(128),
                 text: String::with_capacity(128),
                 refreshing: false,
@@ -1180,7 +1220,10 @@ pub fn run(options: Options) -> io::Result<()> {
                 state(|s| s.renderer = new);
             }
             if RegisterHotKey(hwnd, 1, hotkey.modifiers, hotkey.key) == 0 {
-                return Err(io::Error::other(format!("热键 {} 注册失败（可能已被占用）。请用 --hotkey Ctrl+Alt+P 等组合重启。Windows 错误 {}", options.hotkey, GetLastError())));
+                return Err(io::Error::other(i18n::Failure::Hotkey {
+                    hotkey: options.hotkey.clone(),
+                    code: GetLastError(),
+                }));
             }
             HOTKEY_SET.set(true);
             let tray = Rc::new(tray::Tray::new(hwnd, &options.hotkey)?);

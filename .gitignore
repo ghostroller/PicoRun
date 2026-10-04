@@ -1,6 +1,7 @@
 /target/
 /runtime/
 /results/
+/dist/
 *.pdb
 __pycache__/
 

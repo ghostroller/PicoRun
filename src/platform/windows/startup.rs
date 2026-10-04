@@ -1,5 +1,6 @@
 //! Opt-in per-user logon registration. No writes during normal startup, no timers or service.
 use super::{ffi::Handle, wide, Options};
+use crate::i18n::Text;
 use std::{
     io,
     path::Path,
@@ -133,12 +134,12 @@ impl Registration {
             || !bytes.is_multiple_of(2)
             || bytes as usize > std::mem::size_of_val(&data)
         {
-            return Err(io::Error::other("自启动注册内容无效"));
+            return Err(io::Error::other(Text::StartupInvalid));
         }
         let units = bytes as usize / 2;
         let length = data[..units].iter().position(|u| *u == 0).unwrap_or(units);
         if data[length..units].iter().any(|u| *u != 0) {
-            return Err(io::Error::other("自启动注册内容包含额外数据"));
+            return Err(io::Error::other(Text::StartupExtra));
         }
         Ok(Some(data[..length].to_vec()))
     }
@@ -160,9 +161,7 @@ impl Registration {
             };
         }
         if self.command.len() - 1 > MAX_COMMAND {
-            return Err(io::Error::other(
-                "自启动命令超过 Windows Run 项的 260 字符上限；请缩短程序或数据目录路径",
-            ));
+            return Err(io::Error::other(Text::StartupLong));
         }
         let mut result = null_mut();
         checked(unsafe {
@@ -210,7 +209,7 @@ impl Registration {
 }
 fn argument(output: &mut Vec<u16>, units: &[u16]) -> io::Result<()> {
     if units.contains(&0) {
-        return Err(io::Error::other("自启动参数包含 NUL"));
+        return Err(io::Error::other(Text::StartupNul));
     }
     if !output.is_empty() {
         output.push(32);
