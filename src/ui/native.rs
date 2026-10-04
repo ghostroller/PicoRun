@@ -5,7 +5,9 @@ use crate::{
     theme::{Rgb, Theme},
 };
 use std::{cell::Cell, io, ptr::null, rc::Rc, sync::Arc};
+mod edit_buffer;
 mod row_buffer;
+use edit_buffer::EditBuffer;
 use row_buffer::RowBuffer;
 
 #[derive(Clone, Default)]
@@ -25,6 +27,7 @@ pub struct Renderer {
     help: Vec<u16>,
     empty: Vec<u16>,
     row_buffer: Cell<Option<RowBuffer>>,
+    edit_buffer: Cell<Option<EditBuffer>>,
 }
 pub fn color(Rgb(r, g, b): Rgb) -> u32 {
     u32::from(r) | u32::from(g) << 8 | u32::from(b) << 16
@@ -43,6 +46,7 @@ impl Renderer {
             help: wide("↑↓ 选择   Enter 打开   Esc 隐藏   F5 刷新   Ctrl+Q 退出"),
             empty: wide("没有匹配的应用"),
             row_buffer: Cell::new(None),
+            edit_buffer: Cell::new(None),
         };
         unsafe {
             renderer.font = CreateFontW(
@@ -89,6 +93,84 @@ impl Renderer {
     }
     pub fn height(&self, rows: usize) -> i32 {
         self.top() + self.scale(self.theme.row_height) * rows.max(1) as i32 + self.scale(60)
+    }
+    /// Anchor the input using the maximum panel height; results only expand downward.
+    pub fn placement(&self, work: Rect, rows: usize) -> Rect {
+        let width = self.scale(self.theme.width);
+        let top = work.top
+            + (work.bottom - work.top - self.height(crate::search::MAX_RESULTS)).max(0) / 3;
+        let left = work.left + (work.right - work.left - width).max(0) / 2;
+        Rect {
+            left,
+            top,
+            right: left + width,
+            bottom: top + self.height(rows),
+        }
+    }
+    pub fn release_edit_buffer(&self) {
+        drop(self.edit_buffer.take());
+    }
+    pub fn edit_buffer_bytes(&self) -> usize {
+        let buffer = self.edit_buffer.take();
+        let bytes = buffer.as_ref().map_or(0, |b| b.bytes());
+        self.edit_buffer.set(buffer);
+        bytes
+    }
+    /// Keep native Edit layout/selection intact and recolor its selection pixels locally.
+    /// Native painting remains the fallback while composing or when allocation fails.
+    pub fn paint_edit(&self, hwnd: Hwnd, proc: Option<WndProc>, print: Option<Handle>) -> bool {
+        unsafe {
+            let selection = SendMessageW(hwnd, 0xb0, 0, 0) as u32;
+            if GetFocus() != hwnd || selection & 0xffff == selection >> 16 {
+                self.release_edit_buffer();
+                return false;
+            }
+            let mut client = Rect::default();
+            GetClientRect(hwnd, &mut client);
+            let mut buffer = self.edit_buffer.take();
+            if buffer
+                .as_ref()
+                .is_none_or(|b| b.width != client.right || b.height != client.bottom)
+            {
+                buffer = EditBuffer::new(client.right, client.bottom);
+            }
+            let Some(buffer) = buffer else { return false };
+            // No mutable Runtime/Cell borrow survives the original control procedure.
+            FillRect(buffer.dc, &client, self.background);
+            CallWindowProcW(proc, hwnd, 0x318, buffer.dc as usize, 0xc);
+            GdiFlush(); // Native drawing must finish before touching DIB memory.
+            buffer.recolor(
+                GetSysColor(13),
+                GetSysColor(14),
+                self.theme.input_selection,
+                self.theme.foreground,
+            );
+            let hidden_caret = print.is_none() && HideCaret(hwnd) != 0;
+            let mut paint = Paint::default();
+            let dc = print.unwrap_or_else(|| BeginPaint(hwnd, &mut paint));
+            if BitBlt(
+                dc,
+                0,
+                0,
+                client.right,
+                client.bottom,
+                buffer.dc,
+                0,
+                0,
+                0x00cc0020,
+            ) == 0
+            {
+                CallWindowProcW(proc, hwnd, 0x318, dc as usize, 0xc);
+            }
+            if print.is_none() {
+                EndPaint(hwnd, &paint);
+            }
+            if hidden_caret {
+                ShowCaret(hwnd);
+            }
+            self.edit_buffer.set(Some(buffer));
+            true
+        }
     }
     pub fn paint(&self, hwnd: Hwnd, view: &View) {
         // View owns all strings. No controller/RefCell borrow survives GDI or window calls.
@@ -334,6 +416,40 @@ impl Drop for Renderer {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn input_anchor_is_independent_of_result_count_and_monitor_origin() {
+        for dpi in [96, 168, 192] {
+            let renderer = Renderer::new(Theme::default(), dpi).unwrap();
+            for work in [
+                Rect {
+                    left: 0,
+                    top: 40,
+                    right: 3840,
+                    bottom: 2160,
+                },
+                Rect {
+                    left: -1920,
+                    top: -1080,
+                    right: 0,
+                    bottom: 0,
+                },
+                Rect {
+                    left: 0,
+                    top: 0,
+                    right: 800,
+                    bottom: 600,
+                },
+            ] {
+                let full = renderer.placement(work, 12);
+                for rows in [0, 1, 4, 12] {
+                    let bounds = renderer.placement(work, rows);
+                    assert_eq!((bounds.left, bounds.top), (full.left, full.top));
+                    assert!(bounds.top >= work.top);
+                    assert!(bounds.bottom <= full.bottom);
+                }
+            }
+        }
+    }
     #[test]
     fn icon_column_does_not_overlap_text_or_footer() {
         let icon = Rect {

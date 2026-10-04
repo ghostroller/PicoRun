@@ -209,6 +209,7 @@ unsafe extern "system" {
         lp: isize,
     ) -> isize;
     pub fn SetWindowLongPtrW(hwnd: Hwnd, index: i32, value: isize) -> isize;
+    pub fn GetWindowLongPtrW(hwnd: Hwnd, index: i32) -> isize;
     pub fn GetMessageW(msg: *mut Message, hwnd: Hwnd, min: u32, max: u32) -> i32;
     pub fn TranslateMessage(msg: *const Message) -> i32;
     pub fn DispatchMessageW(msg: *const Message) -> isize;
@@ -232,6 +233,11 @@ unsafe extern "system" {
     pub fn GetGUIThreadInfo(thread: u32, info: *mut GuiThreadInfo) -> i32;
     pub fn GetWindowThreadProcessId(hwnd: Hwnd, pid: *mut u32) -> u32;
     pub fn SetFocus(hwnd: Hwnd) -> Hwnd;
+    pub fn GetFocus() -> Hwnd;
+    pub fn WindowFromDC(dc: Handle) -> Hwnd;
+    pub fn GetSysColor(index: i32) -> u32;
+    pub fn HideCaret(hwnd: Hwnd) -> i32;
+    pub fn ShowCaret(hwnd: Hwnd) -> i32;
     pub fn SetWindowPos(
         hwnd: Hwnd,
         after: Hwnd,
@@ -315,6 +321,7 @@ unsafe extern "system" {
     ) -> i32;
     pub fn SetTextColor(dc: Handle, color: u32) -> u32;
     pub fn SetBkColor(dc: Handle, color: u32) -> u32;
+    pub fn IntersectClipRect(dc: Handle, left: i32, top: i32, right: i32, bottom: i32) -> i32;
     pub fn SetBkMode(dc: Handle, mode: i32) -> i32;
 }
 #[link(name = "kernel32")]

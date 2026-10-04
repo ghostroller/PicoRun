@@ -1,5 +1,7 @@
 //! Native verification helpers live here to keep all Win32 unsafe at the platform boundary.
+mod appearance_probe;
 mod dedup_probe;
+mod edit_drag_probe;
 mod english_probe;
 mod flicker_probe;
 mod icons_probe;
@@ -400,6 +402,86 @@ unsafe fn set_control_text(hwnd: Hwnd, text: *const u16) -> isize {
 unsafe fn get_control_text(hwnd: Hwnd, text: *mut u16, length: i32) -> isize {
     SendMessageW(hwnd, 0xd, length as usize, text as isize)
 }
+fn recalled_query(edit: Hwnd, expected: &str, label: &str, checks: &mut String) -> io::Result<()> {
+    // Queries are bounded to 1024 UTF-16 units, so EM_GETSEL's packed return is sufficient
+    // and needs no cross-process pointers. Use UTF-16 length, including surrogate pairs.
+    let selection = unsafe { SendMessageW(edit, 0xb0, 0, 0) } as u32;
+    let actual = ime_probe::text(edit);
+    expect(
+        actual == expected
+            && selection & 0xffff == 0
+            && selection >> 16 == expected.encode_utf16().count() as u32,
+        &format!("{label}: query retained and fully selected (actual={actual:?}, selection={selection:#x})"),
+        checks,
+    )
+}
+fn query_recall(hwnd: Hwnd, edit: Hwnd, marker: &Path, checks: &mut String) -> io::Result<()> {
+    for text in ["", "wx", "微信 🐱 QQ", "no-match-qzxv"] {
+        for leave in ["Escape", "hotkey", "blur"] {
+            unsafe {
+                SendMessageW(hwnd, 0x8001, 0, 0);
+                set_control_text(edit, wide(text).as_ptr());
+                // Do not explicitly flush EN_CHANGE: reopening must sync a pending query.
+                match leave {
+                    "Escape" => {
+                        SendMessageW(edit, 0x100, 0x1b, 1);
+                    }
+                    "hotkey" => {
+                        SendMessageW(hwnd, 0x312, 1, 0);
+                    }
+                    _ => {
+                        SendMessageW(hwnd, 0x6, 0, 0);
+                    }
+                }
+            }
+            expect(
+                unsafe { IsWindowVisible(hwnd) == 0 } && ime_probe::text(edit) == text,
+                &format!("{leave} preserves hidden native Edit text {text:?}"),
+                checks,
+            )?;
+            unsafe { SendMessageW(hwnd, 0x111, tray::SHOW as usize, 0) };
+            recalled_query(edit, text, &format!("reopen after {leave}"), checks)?;
+        }
+    }
+    unsafe {
+        // Native typing replaces the recalled selection, then immediate Enter must see it.
+        for c in "jsb".chars() {
+            SendMessageW(edit, 0x102, c as usize, 1);
+        }
+    }
+    expect(
+        ime_probe::text(edit) == "jsb",
+        "typing replaces recalled query",
+        checks,
+    )?;
+    let _ = fs::remove_file(marker);
+    unsafe { SendMessageW(edit, 0x100, 0x0d, 1) };
+    expect(
+        wait_marker(marker)?.contains("参数 with spaces|1")
+            && unsafe { IsWindowVisible(hwnd) == 0 }
+            && ime_probe::text(edit) == "jsb",
+        "immediate Enter opens replacement query and retains it while hidden",
+        checks,
+    )?;
+    unsafe { SendMessageW(hwnd, 0x8001, 0, 0) };
+    recalled_query(edit, "jsb", "reopen after application launch", checks)?;
+    let _ = fs::remove_file(marker);
+    unsafe { SendMessageW(edit, 0x100, 0x0d, 1) };
+    expect(
+        wait_marker(marker)?.contains("参数 with spaces|1"),
+        "recalled query still opens matching application without retyping",
+        checks,
+    )?;
+    unsafe {
+        SendMessageW(hwnd, 0x8001, 0, 0);
+        SendMessageW(edit, 0x100, 0x2e, 1);
+    }
+    expect(
+        ime_probe::text(edit).is_empty(),
+        "Delete removes entire recalled selection",
+        checks,
+    )
+}
 fn wait_marker(path: &Path) -> io::Result<String> {
     let start = Instant::now();
     loop {
@@ -481,6 +563,12 @@ pub fn run() -> io::Result<()> {
     }
     if args.first().is_some_and(|a| a == "--mouse") {
         return mouse_probe::run();
+    }
+    if args.first().is_some_and(|a| a == "--appearance") {
+        return appearance_probe::run(args.iter().any(|a| a == "--bench"));
+    }
+    if args.first().is_some_and(|a| a == "--edit-drag") {
+        return edit_drag_probe::run(args.iter().any(|a| a == "--reference"));
     }
     if args.first().is_some_and(|a| a == "--input-source") {
         return input_session_probe::source();
@@ -638,6 +726,7 @@ pub fn run() -> io::Result<()> {
             (cpu_after - cpu_before) as f64 / 10000.0
         ));
         if run == 0 && !real && !baseline {
+            query_recall(hwnd, edit, &marker, &mut checks)?;
             unsafe {
                 SendMessageW(
                     hwnd,
@@ -890,6 +979,8 @@ pub fn run() -> io::Result<()> {
                 "second instance exits and signals existing window",
                 &mut checks,
             )?;
+            barrier(hwnd);
+            recalled_query(edit, "cqyh", "second instance show", &mut checks)?;
             sample(child.0.id(), "after_second_instance", &mut memory)?;
             actual_hotkey();
             expect(
@@ -903,6 +994,7 @@ pub fn run() -> io::Result<()> {
                 "actual Ctrl+Alt+F11 shows hidden window",
                 &mut checks,
             )?;
+            recalled_query(edit, "cqyh", "actual global hotkey reopen", &mut checks)?;
             // Save a valid cache snapshot, corrupt it after process exit, verify recovery on next run.
             sample(child.0.id(), "stress_before", &mut memory)?;
             for i in 0..1000 {

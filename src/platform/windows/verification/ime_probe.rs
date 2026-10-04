@@ -317,6 +317,9 @@ pub(super) fn installed(
     fs::write(root.join("ime-checks-progress.txt"), &*checks)?;
 
     focus(hwnd)?;
+    // This scenario tests cancellation from an explicitly empty query. show() now retains
+    // the last committed query; the preceding scenarios already replace its full selection.
+    unsafe { set_control_text(edit, wide("").as_ptr()) };
     type_keys(hwnd, "weixin")?;
     press(hwnd, 0x1b)?;
     expect(

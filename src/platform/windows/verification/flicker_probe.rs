@@ -9,7 +9,9 @@ fn icons_ready(hwnd: Hwnd, enabled: bool) -> io::Result<()> {
     loop {
         let ready = unsafe { SendMessageW(hwnd, 0x8006, 0, 0) } == 1;
         let visible = unsafe { SendMessageW(hwnd, 0x8006, 6, 0) };
-        if ready && (!enabled || visible == 12) {
+        // This fixture has either 12 results or none. Reopening now retains a no-hit query.
+        let expected = if metric(hwnd, 6) < 0 { 0 } else { 12 };
+        if ready && (!enabled || visible == expected) {
             break;
         }
         if started.elapsed() > Duration::from_secs(10) {
@@ -269,7 +271,8 @@ pub(super) fn run(reference: bool) -> io::Result<()> {
                         icons_ready(hwnd, enabled)?;
                         // Visible keyboard verification goes through Windows' normal key delivery.
                         unsafe {
-                            set_control_text(edit, wide("synthetic").as_ptr());
+                            // Start this first-row scenario explicitly empty; show retains text.
+                            set_control_text(edit, wide("").as_ptr());
                             SendMessageW(hwnd, 0x8003, 0, 0);
                             SendMessageW(hwnd, 0x8001, 0, 0);
                             SetForegroundWindow(hwnd);

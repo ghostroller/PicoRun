@@ -81,6 +81,8 @@ thread_local! {
     static WINDOW: Cell<Hwnd> = const { Cell::new(null_mut()) };
     static EDIT: Cell<Hwnd> = const { Cell::new(null_mut()) };
     static EDIT_PROC: Cell<Option<WndProc>> = const { Cell::new(None) };
+    static EDIT_REDRAW_ENABLED: Cell<bool> = const { Cell::new(true) };
+    static EDIT_UPDATING: Cell<bool> = const { Cell::new(false) };
     static IME: Cell<ime::State> = const { Cell::new(ime::State::EMPTY) };
     static INPUT_PENDING: Cell<bool> = const { Cell::new(false) };
     static HOTKEY_SET: Cell<bool> = const { Cell::new(false) };
@@ -268,7 +270,8 @@ fn show() {
     }
     unsafe {
         cancel_composition();
-        SetWindowTextW(EDIT.get(), wide("").as_ptr());
+        // Retain the native Edit text/results between invocations. Select all after focus so
+        // the next input replaces the previous query without clearing it just by opening.
         sync_query();
         let foreground = GetForegroundWindow();
         let monitor = MonitorFromWindow(foreground, 2);
@@ -280,18 +283,30 @@ fn show() {
         };
         if let Some(renderer) = renderer() {
             let rows = state(|s| s.controller.results().len()).unwrap_or(0);
-            let width = renderer.scale(renderer.theme.width);
-            let height = renderer.height(rows);
             if GetMonitorInfoW(monitor, &mut info) != 0 {
+                let bounds = renderer.placement(info.work, rows);
                 SetWindowPos(
                     hwnd,
                     null_mut(),
-                    info.work.left + (info.work.right - info.work.left - width) / 2,
-                    info.work.top + (info.work.bottom - info.work.top - height) / 3,
-                    width,
-                    height,
+                    bounds.left,
+                    bounds.top,
+                    bounds.right - bounds.left,
+                    bounds.bottom - bounds.top,
                     0x14,
                 );
+                // Moving to another monitor can synchronously replace the renderer/DPI.
+                if let Some(updated) = self::renderer().filter(|r| r.dpi != renderer.dpi) {
+                    let bounds = updated.placement(info.work, rows);
+                    SetWindowPos(
+                        hwnd,
+                        null_mut(),
+                        bounds.left,
+                        bounds.top,
+                        bounds.right - bounds.left,
+                        bounds.bottom - bounds.top,
+                        0x14,
+                    );
+                }
             }
         }
         // The backup precedes activation; apply English after TSF focuses the Edit.
@@ -320,6 +335,7 @@ fn hide() {
     }
     if let Some(renderer) = renderer() {
         renderer.release_row_buffer();
+        renderer.release_edit_buffer();
     }
 }
 fn close() {
@@ -398,7 +414,7 @@ fn activate() {
     hide();
     if let Err(error) = discovery::launch(WINDOW.get(), &target) {
         state(|s| s.status = error.to_string());
-        // Keep the failing query available; do not reset it via show().
+        // Keep the failing query available for correction without changing its selection.
         if state(|s| s.start_english).unwrap_or(false) {
             let _ = input_language::remember(WINDOW.get(), EDIT.get(), true);
         }
@@ -552,11 +568,63 @@ fn tray_command(command: u32) {
         _ => {}
     }
 }
+fn edit_changes_pixels(msg: u32, wp: usize) -> bool {
+    matches!(
+        msg,
+        0xb1 | 0xb7 | 0xc | 0xc2 | 0x100 | 0x102 | 0x201 | 0x202 | 0x203 | 0x300..=0x304
+    ) || msg == 0x200 && wp & 1 != 0
+}
+unsafe fn forward_edit(hwnd: Hwnd, msg: u32, wp: usize, lp: isize) -> isize {
+    let changes_pixels = edit_changes_pixels(msg, wp);
+    // Edit can draw selection changes directly to its window DC, bypassing WM_PAINT.
+    // WM_CTLCOLOREDIT clips that intermediate DC, then we publish one buffered repaint.
+    // No Runtime borrow spans these calls. Reentrant updates belong to the outer call;
+    // native selection, hit testing and scrolling stay enabled throughout.
+    let updating = changes_pixels
+        && !is_composing()
+        && EDIT_REDRAW_ENABLED.get()
+        && !EDIT_UPDATING.get()
+        && GetWindowLongPtrW(hwnd, -16) & 0x10000000 != 0;
+    if updating {
+        EDIT_UPDATING.set(true);
+    }
+    let result = CallWindowProcW(EDIT_PROC.get(), hwnd, msg, wp, lp);
+    if updating {
+        EDIT_UPDATING.set(false);
+    }
+    if changes_pixels && !EDIT_UPDATING.get() && EDIT_REDRAW_ENABLED.get() && EDIT.get() == hwnd {
+        InvalidateRect(hwnd, null(), 0);
+        UpdateWindow(hwnd);
+    }
+    result
+}
 unsafe extern "system" fn edit_proc(hwnd: Hwnd, msg: u32, wp: usize, lp: isize) -> isize {
     if msg == 0xf && state(|s| s.measure_icons).unwrap_or(false) {
         diagnostics::edit_paint();
     }
     match msg {
+        0xb => EDIT_REDRAW_ENABLED.set(wp != 0),
+        0x82 => {
+            EDIT_REDRAW_ENABLED.set(false);
+            EDIT.set(null_mut());
+        }
+        0xf if EDIT_UPDATING.get() && !is_composing() || !EDIT_REDRAW_ENABLED.get() => {
+            let mut paint = Paint::default();
+            BeginPaint(hwnd, &mut paint);
+            EndPaint(hwnd, &paint);
+            return 0;
+        }
+        0xf | 0x318 if !is_composing() => {
+            if let Some(renderer) = renderer() {
+                if renderer.paint_edit(
+                    hwnd,
+                    EDIT_PROC.get(),
+                    (msg == 0x318).then_some(wp as Handle),
+                ) {
+                    return 0;
+                }
+            }
+        }
         0x7 => {
             let result = CallWindowProcW(EDIT_PROC.get(), hwnd, msg, wp, lp);
             if state(|s| s.start_english).unwrap_or(false)
@@ -571,6 +639,9 @@ unsafe extern "system" fn edit_proc(hwnd: Hwnd, msg: u32, wp: usize, lp: isize) 
         }
         0x10d => {
             update_ime(|s| s.start());
+            if let Some(renderer) = renderer() {
+                renderer.release_edit_buffer();
+            }
             update_ime_font(hwnd);
         }
         0x30 => {
@@ -649,7 +720,7 @@ unsafe extern "system" fn edit_proc(hwnd: Hwnd, msg: u32, wp: usize, lp: isize) 
         0x102 if [13, 27, 17].contains(&wp) && !is_composing() => return 0,
         _ => {}
     }
-    CallWindowProcW(EDIT_PROC.get(), hwnd, msg, wp, lp)
+    forward_edit(hwnd, msg, wp, lp)
 }
 unsafe extern "system" fn window_proc(hwnd: Hwnd, msg: u32, wp: usize, lp: isize) -> isize {
     if state(|s| s.measure_icons).unwrap_or(false) {
@@ -707,6 +778,8 @@ unsafe extern "system" fn window_proc(hwnd: Hwnd, msg: u32, wp: usize, lp: isize
                 return -1;
             }
             EDIT.set(edit);
+            EDIT_REDRAW_ENABLED.set(true);
+            EDIT_UPDATING.set(false);
             let previous = SetWindowLongPtrW(edit, -4, edit_proc as *const () as isize);
             EDIT_PROC.set(Some(std::mem::transmute::<isize, WndProc>(previous)));
             SendMessageW(edit, 0xc5, 1024, 0); // EM_SETLIMITTEXT: bound query memory.
@@ -839,6 +912,15 @@ unsafe extern "system" fn window_proc(hwnd: Hwnd, msg: u32, wp: usize, lp: isize
             return 0;
         }
         0x133 => {
+            if lp == EDIT.get() as isize
+                && EDIT_UPDATING.get()
+                && !is_composing()
+                && WindowFromDC(wp as Handle) == EDIT.get()
+            {
+                // This borrowed window DC is released by native Edit, resetting the
+                // common DC's clipping. Do not clip DIB/printer targets used for printing.
+                IntersectClipRect(wp as Handle, 0, 0, 0, 0);
+            }
             if let Some(renderer) = renderer() {
                 SetTextColor(wp as Handle, color(renderer.theme.foreground));
                 SetBkColor(wp as Handle, color(renderer.theme.background));

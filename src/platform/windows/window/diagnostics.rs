@@ -122,6 +122,8 @@ pub(super) unsafe fn message(hwnd: Hwnd, msg: u32, wp: usize) -> Option<isize> {
                     .map_or(-1, |i| i as isize)
             } else if wp == 12 {
                 renderer().map_or(0, |r| r.row_buffer_pixels() as isize)
+            } else if wp == 13 {
+                renderer().map_or(0, |r| r.edit_buffer_bytes() as isize)
             } else {
                 *ARROW_REGION.get().get(wp).unwrap_or(&0) as isize
             }

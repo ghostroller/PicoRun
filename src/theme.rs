@@ -4,6 +4,7 @@ pub struct Theme {
     pub background: Rgb,
     pub foreground: Rgb,
     pub selection: Rgb,
+    pub input_selection: Rgb,
     pub muted: Rgb,
     pub font_family: String,
     pub font_size: u16,
@@ -41,6 +42,7 @@ impl ThemeMode {
             theme.background = Rgb(248, 249, 251);
             theme.foreground = Rgb(28, 32, 39);
             theme.selection = Rgb(216, 231, 250);
+            theme.input_selection = Rgb(220, 223, 228);
             theme.muted = Rgb(94, 101, 113);
         }
         theme
@@ -53,6 +55,7 @@ impl Default for Theme {
             background: Rgb(24, 26, 30),
             foreground: Rgb(235, 237, 240),
             selection: Rgb(44, 65, 90),
+            input_selection: Rgb(63, 66, 73),
             muted: Rgb(150, 155, 165),
             font_family: "Segoe UI".into(),
             font_size: 16,
