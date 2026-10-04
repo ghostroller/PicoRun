@@ -13,7 +13,7 @@
 
 ## 安装
 
-**目前尚未发布可直接下载的预编译版本。** 可以先[从源码构建](#从源码构建)，也可以[生成 Windows 安装包和 ZIP](#生成-windows-安装包和-zip)用于分发。
+从 [GitHub Releases](https://github.com/ghostroller/PicoRun/releases/latest) 下载安装包或 ZIP。每个版本的页面列出带版本号的 Windows x64 安装包、ZIP、SHA-256 校验和及构建元数据。也可以[从源码构建](#从源码构建)。
 
 分发包面向 **Windows x64**，最低目标系统为 Windows 10。目前已验证 Windows 11 x64；Windows 10、32 位 Windows 和 ARM64 尚未验证。
 
@@ -123,7 +123,7 @@ cargo build --release --offline --bin picorun
 
 编译器查找、静默安装和安装生命周期验证见[安装与打包说明](docs/INSTALLATION.md)。
 
-也可以在 GitHub 的 **Actions → Package Windows → Run workflow** 手动打包。该 workflow 仅在手动启动时运行；完成后从构建产物下载 **PicoRun-windows-x64**，其中包含安装包、ZIP、SHA-256 校验和及构建元数据，保留 30 天。见 [workflow 配置](.github/workflows/package-windows.yml)。
+在 GitHub 发布时，先推送与 `Cargo.toml` 版本一致的标签，例如 `v0.1.0`。打开 **Actions → Package Windows → Run workflow**，选择 `main` 运行 workflow，再填写版本标签。该任务仅手动触发，从标签读取源码构建，将安装包、ZIP、SHA-256 校验和及构建元数据发布到对应版本的 Release 页面，同时保留 30 天的 Actions 构建产物；不会覆盖已发布的 Release。见 [workflow 配置](.github/workflows/package-windows.yml)。
 
 ### 检查与技术文档
 

@@ -13,7 +13,7 @@ Press **Alt+Space**, type an app name, and press **Enter** to open it. Search us
 
 ## Installation
 
-**Prebuilt downloads have not been published yet.** For now, [build from source](#build-from-source). The project can also [create Windows packages](#create-windows-packages) for distribution.
+Download the installer or ZIP from [GitHub Releases](https://github.com/ghostroller/PicoRun/releases/latest). Each release lists the versioned Windows x64 packages, SHA-256 checksums, and build metadata. You can also [build from source](#build-from-source).
 
 Packages target **Windows x64**, with Windows 10 as the minimum target. Testing so far covers Windows 11 x64; Windows 10, 32-bit Windows, and ARM64 have not been verified.
 
@@ -123,7 +123,7 @@ The packaging script produces an installer, ZIP, checksums, and build metadata i
 
 See [installation and packaging details](docs/INSTALLATION.md) for compiler discovery, silent installation, and lifecycle verification.
 
-To package on GitHub, open **Actions → Package Windows → Run workflow**. The workflow runs only when started manually. Download **PicoRun-windows-x64** from the run's artifacts for the installer, ZIP, SHA-256 checksums, and build metadata; artifacts are retained for 30 days. See [the workflow](.github/workflows/package-windows.yml).
+To publish on GitHub, push a version tag matching `Cargo.toml`, such as `v0.1.0`. Open **Actions → Package Windows → Run workflow**, select `main` for the workflow, and enter the tag. The workflow runs only when started manually, builds the tagged source, and publishes the installer, ZIP, SHA-256 checksums, and build metadata to that tag's Release. It also retains an Actions artifact for 30 days. Existing published releases are not overwritten. See [the workflow](.github/workflows/package-windows.yml).
 
 ### Checks and engineering notes
 

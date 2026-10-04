@@ -1,10 +1,20 @@
 name: Package Windows
+run-name: Release ${{ inputs.tag }}
 
 on:
   workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Existing version tag to package and publish (for example v0.1.0)'
+        required: true
+        type: string
 
 permissions:
-  contents: read
+  contents: write
+
+concurrency:
+  group: package-windows-${{ inputs.tag }}
+  cancel-in-progress: false
 
 jobs:
   package:
@@ -16,17 +26,38 @@ jobs:
         shell: pwsh
     env:
       RUSTUP_TOOLCHAIN: 1.95.0-x86_64-pc-windows-msvc
+      RELEASE_TAG: ${{ inputs.tag }}
 
     steps:
+      - name: Validate version tag
+        run: |
+          if ($env:RELEASE_TAG -notmatch '^v\d+\.\d+\.\d+$') {
+            throw 'Specify an existing version tag in the form v1.2.3.'
+          }
+
       - name: Check out source
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
+          ref: refs/tags/${{ inputs.tag }}
           persist-credentials: false
 
       - name: Prepare Rust toolchain
         run: |
           rustup toolchain install $env:RUSTUP_TOOLCHAIN --profile minimal
           if ($LASTEXITCODE -ne 0) { throw 'Rust toolchain installation failed.' }
+
+      - name: Verify tag matches package version
+        run: |
+          $metadataJson = & cargo metadata --offline --no-deps --format-version 1
+          if ($LASTEXITCODE -ne 0) { throw 'Cargo metadata failed.' }
+          $packages = @((($metadataJson -join "`n") | ConvertFrom-Json).packages | Where-Object { $_.name -eq 'picorun' })
+          if ($packages.Count -ne 1 -or $env:RELEASE_TAG -cne "v$($packages[0].version)") {
+            throw 'Version tag must match PicoRun version in Cargo.toml.'
+          }
+          $sourceCommit = & git rev-parse HEAD
+          if ($LASTEXITCODE -ne 0) { throw 'Unable to read the tagged source commit.' }
+          "RELEASE_COMMIT=$sourceCommit" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          Write-Host "Packaging $env:RELEASE_TAG from $sourceCommit"
 
       - name: Prepare Inno Setup 6.7.3
         run: |
@@ -51,6 +82,15 @@ jobs:
       - name: Build installer and ZIP
         run: ./tools/package_windows.ps1 -Iscc $env:INNO_SETUP_ISCC
 
+      - name: Record release source
+        run: |
+          $version = $env:RELEASE_TAG.Substring(1)
+          $metadataPath = "dist/PicoRun-$version-build.json"
+          $details = Get-Content -LiteralPath $metadataPath -Raw | ConvertFrom-Json
+          $details | Add-Member -NotePropertyName source_tag -NotePropertyValue $env:RELEASE_TAG
+          $details | Add-Member -NotePropertyName source_commit -NotePropertyValue $env:RELEASE_COMMIT
+          $details | ConvertTo-Json -Depth 3 | Set-Content -LiteralPath $metadataPath -Encoding utf8
+
       - name: Upload Windows packages
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
@@ -63,3 +103,32 @@ jobs:
           if-no-files-found: error
           retention-days: 30
           compression-level: 0
+
+      - name: Publish versioned GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $version = $env:RELEASE_TAG.Substring(1)
+          $releaseFiles = @(
+            "dist/PicoRun-$version-windows-x64-setup.exe",
+            "dist/PicoRun-$version-windows-x64.zip",
+            "dist/PicoRun-$version-SHA256SUMS.txt",
+            "dist/PicoRun-$version-build.json"
+          )
+          foreach ($releaseFile in $releaseFiles) {
+            if (-not (Test-Path -LiteralPath $releaseFile -PathType Leaf)) {
+              throw "Missing release file: $releaseFile"
+            }
+          }
+          $notesPath = Join-Path $env:RUNNER_TEMP 'picorun-release-notes.md'
+          @(
+            "Windows x64 installer and ZIP for PicoRun $env:RELEASE_TAG.",
+            '',
+            '- Install with the setup executable, or extract the ZIP and run picorun.exe.',
+            '- SHA256SUMS.txt contains checksums for both packages.',
+            '- build.json records the build toolchain and tagged source commit.',
+            '',
+            'Targets Windows 10 or newer; application validation so far covers Windows 11 x64.'
+          ) | Set-Content -LiteralPath $notesPath -Encoding utf8
+          & gh release create $env:RELEASE_TAG @releaseFiles --repo $env:GITHUB_REPOSITORY --verify-tag --title "PicoRun $env:RELEASE_TAG" --notes-file $notesPath
+          if ($LASTEXITCODE -ne 0) { throw 'GitHub Release publication failed.' }

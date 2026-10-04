@@ -48,11 +48,13 @@ ZIP 仍使用系统 LocalAppData 下的 `PicoRun` 数据目录，不称为完全
 
 ## GitHub 手动打包
 
-[Package Windows](../.github/workflows/package-windows.yml) 是唯一的 Actions workflow，只监听 `workflow_dispatch`，不由 push、PR 或 tag 自动触发。配置进入默认分支后，在 **Actions → Package Windows → Run workflow** 选择分支并运行。
+[Package Windows](../.github/workflows/package-windows.yml) 是唯一的 Actions workflow，只监听 `workflow_dispatch`，不由 push、PR 或 tag 自动触发。在 **Actions → Package Windows → Run workflow** 选择 `main`，填写已推送的版本标签（例如 `v0.1.0`）再运行；也可执行 `gh workflow run package-windows.yml --ref main -f tag=v0.1.0`。
 
-任务使用 `windows-2025` runner、Rust 1.95.0 MSVC 和 Inno Setup 6.7.3。Inno 编译器在 runner 上从官方固定版本下载，校验 SHA-256 后安装；项目的本地打包脚本继续保持不自动下载或安装工具。任务只调用现有 `tools/package_windows.ps1` 构建 Windows x64 安装包和 ZIP，版本来自所选分支的 `Cargo.toml`。
+任务使用 `windows-2025` runner、Rust 1.95.0 MSVC 和 Inno Setup 6.7.3。workflow 定义来自所选分支，应用源码明确检出 `refs/tags/<版本标签>`，标签必须采用 `v主.次.修订` 格式并与源码的 `Cargo.toml` 版本一致。这样可用最新发布流程构建既有标签，无需移动旧标签。Inno 编译器在 runner 上从官方固定版本下载，校验 SHA-256 后安装；项目的本地打包脚本继续保持不自动下载或安装工具。
 
-成功后，从该次运行的 **Artifacts** 下载 `PicoRun-windows-x64`，包含上面的四种产物，保留 30 天。workflow 只有源码读取权限，不发布 GitHub Release。此任务负责构建和打包，不执行 GUI、输入法或性能验收。
+任务调用现有 `tools/package_windows.ps1` 构建 Windows x64 安装包和 ZIP，在构建元数据中补充源码标签与提交。成功后创建标题为 `PicoRun <标签>` 的正式 GitHub Release，上传上面四种带版本号的产物；下载入口见 [Releases](https://github.com/ghostroller/PicoRun/releases)。Actions 中也保留 `PicoRun-windows-x64` 构建产物 30 天。
+
+发布步骤使用仓库提供的 `GITHUB_TOKEN` 和 `contents: write` 权限，`--verify-tag` 要求标签已经存在；同一标签的任务串行执行。已存在的 Release 不覆盖，发布新版本时使用新的版本号和标签。此任务负责构建与发布，不执行 GUI、输入法或性能验收。
 
 ## 验证与边界
 
