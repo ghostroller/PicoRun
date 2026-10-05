@@ -229,6 +229,7 @@ unsafe extern "system" {
     pub fn ShowWindow(hwnd: Hwnd, cmd: i32) -> i32;
     pub fn IsWindowVisible(hwnd: Hwnd) -> i32;
     pub fn SetForegroundWindow(hwnd: Hwnd) -> i32;
+    pub fn AllowSetForegroundWindow(process: u32) -> i32;
     pub fn GetForegroundWindow() -> Hwnd;
     pub fn GetGUIThreadInfo(thread: u32, info: *mut GuiThreadInfo) -> i32;
     pub fn GetWindowThreadProcessId(hwnd: Hwnd, pid: *mut u32) -> u32;
@@ -331,6 +332,21 @@ unsafe extern "system" {
     pub fn GetLastError() -> u32;
     pub fn SetLastError(error: u32);
     pub fn CreateMutexW(attributes: *const c_void, owner: i32, name: *const u16) -> Handle;
+    pub fn ReleaseMutex(mutex: Handle) -> i32;
+    pub fn CreateEventW(
+        attributes: *const c_void,
+        manual: i32,
+        initial: i32,
+        name: *const u16,
+    ) -> Handle;
+    pub fn SetEvent(event: Handle) -> i32;
+    pub fn ResetEvent(event: Handle) -> i32;
+    pub fn WaitForMultipleObjects(
+        count: u32,
+        handles: *const Handle,
+        all: i32,
+        timeout: u32,
+    ) -> u32;
     pub fn CloseHandle(handle: Handle) -> i32;
     pub fn MoveFileExW(source: *const u16, destination: *const u16, flags: u32) -> i32;
     pub fn AttachConsole(process: u32) -> i32;

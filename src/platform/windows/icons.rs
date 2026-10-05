@@ -63,6 +63,16 @@ struct Shared {
     stop: AtomicBool,
     invalidate: AtomicBool,
 }
+impl Shared {
+    fn stop(&self) {
+        // Publish under the same lock as the worker's predicate check and wait.
+        // Otherwise notification can fall between that check and entering wait,
+        // leaving an idle worker asleep while Drop waits forever in join().
+        let _next = self.latest.lock().unwrap();
+        self.stop.store(true, Ordering::Release);
+        self.wake.notify_one();
+    }
+}
 pub struct Completed {
     generation: u64,
     pub icons: Vec<Option<Arc<Icon>>>,
@@ -152,8 +162,7 @@ impl Worker {
 impl Drop for Worker {
     fn drop(&mut self) {
         self.rx.take(); // Unblock a full completion channel before joining.
-        self.shared.stop.store(true, Ordering::Release);
-        self.shared.wake.notify_one();
+        self.shared.stop();
         // Caller holds no Runtime borrow. An in-flight native extraction must finish first.
         if let Some(join) = self.join.take() {
             let _ = join.join();
@@ -231,6 +240,58 @@ impl Session {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::time::{Duration, Instant};
+
+    #[test]
+    fn stopping_cannot_notify_between_the_idle_check_and_wait() {
+        let shared = Arc::new(Shared {
+            latest: Mutex::new(None),
+            wake: Condvar::new(),
+            stop: AtomicBool::new(false),
+            invalidate: AtomicBool::new(false),
+        });
+        let mut next = shared.latest.lock().unwrap();
+        // Pause the worker after the idle predicate was checked but before wait.
+        assert!(next.is_none() && !shared.stop.load(Ordering::Acquire));
+        let (started_tx, started_rx) = mpsc::channel();
+        let (stopped_tx, stopped_rx) = mpsc::channel();
+        let stopping = Arc::clone(&shared);
+        let stopper = thread::spawn(move || {
+            started_tx.send(()).unwrap();
+            stopping.stop();
+            stopped_tx.send(()).unwrap();
+        });
+        started_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+        let stopped_before_wait = stopped_rx.recv_timeout(Duration::from_millis(100)).is_ok();
+
+        // Enter wait even if a faulty stopper published early: that is the exact
+        // lost-notification interval. Bound waits so a regression fails, not hangs.
+        let deadline = Instant::now() + Duration::from_secs(2);
+        let mut timed_out = false;
+        loop {
+            let (guard, result) = shared
+                .wake
+                .wait_timeout(next, deadline.saturating_duration_since(Instant::now()))
+                .unwrap();
+            next = guard;
+            if result.timed_out() {
+                timed_out = true;
+                break;
+            }
+            if shared.stop.load(Ordering::Acquire) {
+                break;
+            }
+        }
+        let stopped = shared.stop.load(Ordering::Acquire);
+        drop(next);
+        stopper.join().unwrap();
+        assert!(
+            !stopped_before_wait,
+            "stop must wait for the predicate lock"
+        );
+        assert!(stopped && !timed_out, "the idle worker must wake on stop");
+    }
+
     #[test]
     fn empty_visible_results_do_not_start_worker_or_allocate_cache() {
         let session = Session::new(null_mut());

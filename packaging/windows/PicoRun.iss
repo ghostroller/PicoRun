@@ -123,9 +123,60 @@ begin
   end;
 end;
 
+function AbsoluteExecutablePath(Path: String): Boolean;
+var
+  Separator: String;
+  ServerEnd, ShareEnd: Integer;
+  Server, Share, Remainder: String;
+begin
+  Result := False;
+  if Length(Path) < 4 then
+    Exit;
+  if Path[Length(Path)] = '\' then
+    Exit;
+  if (Path[2] = ':') and (Path[3] = '\') then begin
+    Result := ((Path[1] >= 'A') and (Path[1] <= 'Z')) or
+      ((Path[1] >= 'a') and (Path[1] <= 'z'));
+    Exit;
+  end;
+  // A normal UNC path needs a server, share, and executable path. Device namespaces,
+  // root-relative paths and incomplete shares remain outside the ownership parser.
+  if Copy(Path, 1, 2) <> '\\' then
+    Exit;
+  Separator := '\';
+  Remainder := Copy(Path, 3, Length(Path) - 2);
+  ServerEnd := Pos(Separator, Remainder);
+  if ServerEnd <= 1 then
+    Exit;
+  Server := Copy(Remainder, 1, ServerEnd - 1);
+  if (Server = '.') or (Server = '..') or (Server = '?') then
+    Exit;
+  Remainder := Copy(Remainder, ServerEnd + 1, Length(Remainder) - ServerEnd);
+  ShareEnd := Pos(Separator, Remainder);
+  if (ShareEnd <= 1) or (ShareEnd = Length(Remainder)) then
+    Exit;
+  Share := Copy(Remainder, 1, ShareEnd - 1);
+  if (Share = '.') or (Share = '..') then
+    Exit;
+  Result := True;
+end;
+
+function OwnsStartupCommand(Command, InstalledExe: String): Boolean;
+var
+  Executable: String;
+begin
+  Executable := CommandExecutable(Command);
+  Result := False;
+  if not AbsoluteExecutablePath(Executable) then
+    Exit;
+  if not AbsoluteExecutablePath(InstalledExe) then
+    Exit;
+  Result := CompareText(ExpandFileName(Executable), ExpandFileName(InstalledExe)) = 0;
+end;
+
 procedure RemoveOwnedStartupRegistration;
 var
-  Command, Executable, InstalledExe: String;
+  Command, InstalledExe: String;
 begin
   // Never create a startup entry. Preserve registrations belonging to another copy.
   Log('Checking startup registration ownership');
@@ -133,19 +184,9 @@ begin
     Log('No readable startup registration');
     Exit;
   end;
-  Executable := CommandExecutable(Command);
-  if Length(Executable) < 3 then begin
-    Log('Startup command has no complete executable');
-    Exit;
-  end;
-  // Only a complete absolute drive path is understood; malformed/unknown data stays.
-  if (Executable[2] <> ':') or (Executable[3] <> '\') then begin
-    Log('Startup command has no absolute drive path');
-    Exit;
-  end;
   InstalledExe := ExpandConstant('{app}\picorun.exe');
-  if CompareText(ExpandFileName(Executable), ExpandFileName(InstalledExe)) <> 0 then begin
-    Log('Startup command belongs to a different installation');
+  if not OwnsStartupCommand(Command, InstalledExe) then begin
+    Log('Startup command is malformed or belongs to a different installation');
     Exit;
   end;
   if RegDeleteValue(HKCU, '{#StartupKey}', 'PicoRun') then

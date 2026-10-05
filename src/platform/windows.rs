@@ -5,6 +5,7 @@ pub mod ffi;
 pub(crate) mod icons;
 mod ime;
 mod input_language;
+mod instance;
 mod settings;
 mod startup;
 mod tray;

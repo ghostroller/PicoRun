@@ -1,5 +1,5 @@
 use super::{
-    discovery, ffi::*, icons, ime, input_language, settings, startup, tray, wide, Hotkey,
+    discovery, ffi::*, icons, ime, input_language, instance, settings, startup, tray, wide, Hotkey,
     DEFAULT_HOTKEY,
 };
 mod diagnostics;
@@ -315,12 +315,19 @@ fn show() {
         }
         // The backup precedes activation; apply English after TSF focuses the Edit.
         ShowWindow(hwnd, 5);
-        SetForegroundWindow(hwnd);
-        SetFocus(EDIT.get());
-        if state(|s| s.start_english).unwrap_or(false) && IsWindowVisible(hwnd) != 0 {
-            if let Err(error) = input_language::begin(hwnd, EDIT.get()) {
-                report(Notice::error(Text::InputEnglish, error));
+        let activated = SetForegroundWindow(hwnd) != 0 || GetForegroundWindow() == hwnd;
+        if activated {
+            SetFocus(EDIT.get());
+            if state(|s| s.start_english).unwrap_or(false) && IsWindowVisible(hwnd) != 0 {
+                if let Err(error) = input_language::begin(hwnd, EDIT.get()) {
+                    report(Notice::error(Text::InputEnglish, error));
+                }
             }
+        } else {
+            // Windows can deny foreground activation even after permission was handed over.
+            // Do not change the input mode of the user's still-active application.
+            let _ = input_language::restore();
+            report(Text::ForegroundDenied);
         }
         SendMessageW(EDIT.get(), 0xb1, 0, -1);
         request_icons();
@@ -1031,14 +1038,6 @@ unsafe extern "system" fn window_proc(hwnd: Hwnd, msg: u32, wp: usize, lp: isize
     }
     DefWindowProcW(hwnd, msg, wp, lp)
 }
-struct OwnedHandle(Handle);
-impl Drop for OwnedHandle {
-    fn drop(&mut self) {
-        unsafe {
-            CloseHandle(self.0);
-        }
-    }
-}
 struct Com;
 impl Drop for Com {
     fn drop(&mut self) {
@@ -1077,17 +1076,27 @@ fn dpi(hwnd: Hwnd) -> u32 {
 pub fn run(options: Options) -> io::Result<()> {
     super::prepare_language(options.data_dir.as_deref())?;
     let hotkey = Hotkey::parse(&options.hotkey)?;
+    let startup_instance = instance::Instance::acquire()?;
     unsafe {
-        let handle = CreateMutexW(null(), 0, wide("Local\\PicoRun.Native.v1").as_ptr());
-        if handle.is_null() {
-            return Err(io::Error::last_os_error());
-        }
-        let existed = GetLastError() == 183;
-        let _mutex = OwnedHandle(handle);
-        if existed {
+        if !startup_instance.is_primary() {
+            startup_instance.wait_ready(10_000)?;
             let existing = FindWindowW(wide(CLASS).as_ptr(), null());
-            if !existing.is_null() {
-                PostMessageW(existing, SHOW, 0, 0);
+            if existing.is_null() {
+                return Err(io::Error::new(
+                    io::ErrorKind::BrokenPipe,
+                    Text::InstanceExited,
+                ));
+            }
+            let mut process = 0;
+            if GetWindowThreadProcessId(existing, &mut process) == 0 {
+                return Err(io::Error::last_os_error());
+            }
+            // A newly launched process may have foreground permission while the hidden
+            // primary does not. Transfer that permission before asking it to show itself.
+            // If Windows refuses, show() leaves input alone and reports a click-to-focus hint.
+            AllowSetForegroundWindow(process);
+            if PostMessageW(existing, SHOW, 0, 0) == 0 {
+                return Err(io::Error::last_os_error());
             }
             return Ok(());
         }
@@ -1228,6 +1237,7 @@ pub fn run(options: Options) -> io::Result<()> {
             HOTKEY_SET.set(true);
             let tray = Rc::new(tray::Tray::new(hwnd, &options.hotkey)?);
             state(|s| s.tray = Some(tray));
+            startup_instance.signal_ready()?;
             if !options.hidden {
                 show();
             }

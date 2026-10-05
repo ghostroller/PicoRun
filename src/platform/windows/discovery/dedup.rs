@@ -30,9 +30,9 @@ impl Targets {
 
 #[derive(Debug, Hash, PartialEq, Eq)]
 struct LaunchKey {
-    target: String,
+    target: PathKey,
     arguments: Vec<u16>,
-    directory: String,
+    directory: PathKey,
     show: u32,
     flags: u32,
     hotkey: u16,
@@ -42,8 +42,8 @@ struct LaunchKey {
 impl LaunchKey {
     fn owned_bytes(&self) -> usize {
         std::mem::size_of::<Self>()
-            + self.target.capacity()
-            + self.directory.capacity()
+            + self.target.owned_bytes()
+            + self.directory.owned_bytes()
             + self.arguments.capacity() * 2
             + self.extra.capacity()
     }
@@ -94,7 +94,7 @@ impl<'a> Cursor<'a> {
     }
 }
 
-fn local_path(value: &str) -> Option<String> {
+fn local_path(value: &str) -> Option<PathKey> {
     let bytes = value.as_bytes();
     if bytes.len() < 3
         || !bytes[0].is_ascii_alphabetic()
@@ -106,7 +106,7 @@ fn local_path(value: &str) -> Option<String> {
         return None;
     }
     // Lexical only: no canonicalize, environment expansion, Resolve, or target-file IO.
-    Some(value.replace('/', "\\").to_lowercase())
+    Some(PathKey::new(Path::new(value)))
 }
 
 #[cfg(test)]
@@ -158,6 +158,22 @@ mod tests {
                 parse(&variant, "C:\\app.exe")
             );
         }
+    }
+    #[test]
+    fn unicode_targets_and_working_directories_do_not_form_the_same_launch_key() {
+        let ordinary = link("same arguments", "C:\\Work");
+        assert_ne!(
+            parse(&ordinary, "C:\\İ.exe"),
+            parse(&ordinary, "C:\\i\u{0307}.exe")
+        );
+        assert_ne!(
+            parse(&link("same arguments", "C:\\İ"), "C:\\app.exe"),
+            parse(&link("same arguments", "C:\\i\u{0307}"), "C:\\app.exe")
+        );
+        assert_eq!(
+            parse(&link("same arguments", "C:/WORK"), "C:/APP.exe"),
+            parse(&link("same arguments", "c:\\work"), "c:\\app.EXE")
+        );
     }
     #[test]
     fn incomplete_special_and_large_links_have_no_key() {
@@ -304,7 +320,7 @@ fn parse(bytes: &[u8], target: &str) -> Option<LaunchKey> {
         c.position = info_start;
         c.take(info_size)?;
     }
-    let mut directory = String::new();
+    let mut directory = PathKey::default();
     let mut arguments = Vec::new();
     for flag in [4, 8, 0x10, 0x20, 0x40] {
         if flags & flag != 0 {
@@ -446,8 +462,7 @@ impl Collector {
                     let old = &mut self.candidates[index];
                     let better = priority < old.priority
                         || priority == old.priority
-                            && path.to_string_lossy().to_lowercase()
-                                < old.path.to_string_lossy().to_lowercase();
+                            && PathKey::new(&path) < PathKey::new(&old.path);
                     if better {
                         *old = Candidate {
                             name,

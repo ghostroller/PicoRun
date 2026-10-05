@@ -1,10 +1,12 @@
 use super::{ffi::*, wide};
 use crate::i18n::Text;
 mod dedup;
+mod path_key;
 use crate::{
     catalog::Catalog,
     model::{AppEntry, LaunchTarget},
 };
+use path_key::PathKey;
 use std::{
     collections::HashSet,
     ffi::c_void,
@@ -41,9 +43,15 @@ const FOLDERS: [Guid; 4] = [
     },
 ];
 pub fn known_folder(id: &Guid) -> io::Result<PathBuf> {
+    known_folder_with_flags(id, 0)
+}
+fn known_folder_with_flags(id: &Guid, flags: u32) -> io::Result<PathBuf> {
     let mut ptr = null_mut();
     unsafe {
-        if SHGetKnownFolderPath(id, 0, null_mut(), &mut ptr) < 0 {
+        // Shell owns the allocation until it returns; its contract requires freeing the
+        // returned pointer on failure too. No window/controller borrow crosses this call.
+        if SHGetKnownFolderPath(id, flags, null_mut(), &mut ptr) < 0 || ptr.is_null() {
+            CoTaskMemFree(ptr.cast());
             return Err(io::Error::other(Text::KnownFolders));
         }
         let mut len = 0;
@@ -66,10 +74,18 @@ pub fn data_directory() -> io::Result<PathBuf> {
     .map(|p| p.join("PicoRun"))
 }
 pub fn roots() -> (Vec<PathBuf>, usize) {
+    source_roots(known_folder_with_flags)
+}
+fn source_roots(
+    mut resolve: impl FnMut(&Guid, u32) -> io::Result<PathBuf>,
+) -> (Vec<PathBuf>, usize) {
     let mut paths = Vec::new();
     let mut failures = 0;
     for id in FOLDERS {
-        match known_folder(&id) {
+        // KF_FLAG_DONT_VERIFY: retrieve the configured location even when a redirected
+        // directory is offline. read_dir then records its path for old-entry preservation.
+        // The LocalAppData query above retains its existing verified-path behavior.
+        match resolve(&id, 0x4000) {
             Ok(path) => paths.push(path),
             Err(_) => failures += 1,
         }
@@ -210,17 +226,17 @@ impl Scan {
             .iter()
             .filter_map(|e| {
                 if let LaunchTarget::ShellPath(path) = &e.target {
-                    Some(path.to_string_lossy().to_lowercase())
+                    Some(PathKey::new(path))
                 } else {
                     None
                 }
             })
             .collect();
+        let failed: Vec<_> = self.failed.iter().map(|root| PathKey::new(root)).collect();
         for entry in previous.entries() {
             if let LaunchTarget::ShellPath(path) = &entry.target {
-                if self.failed.iter().any(|root| path.starts_with(root))
-                    && seen.insert(path.to_string_lossy().to_lowercase())
-                {
+                let key = PathKey::new(path);
+                if failed.iter().any(|root| key.is_within(root)) && seen.insert(key) {
                     self.entries.push(entry.clone());
                 }
             }
@@ -293,7 +309,7 @@ pub fn discover(roots: &[PathBuf], previous: Option<&Catalog>) -> io::Result<Sca
                 continue;
             }
             // Skip overlapping roots before COM loads the same shortcut again.
-            if !seen.insert(path.to_string_lossy().to_lowercase()) {
+            if !seen.insert(PathKey::new(&path)) {
                 continue;
             }
             let target = if shortcut {
@@ -372,6 +388,95 @@ pub fn launch(hwnd: Hwnd, target: &LaunchTarget) -> io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn source_lookup_keeps_offline_location_for_real_scan_recovery() {
+        unsafe {
+            assert!(CoInitializeEx(null_mut(), 2) >= 0);
+        }
+        let root =
+            std::env::temp_dir().join(format!("picorun-offline-source-{}", std::process::id()));
+        let okay = root.join("okay");
+        let offline = root.join("offline");
+        fs::create_dir_all(&okay).unwrap();
+        fs::write(okay.join("current.exe"), "synthetic; never executed").unwrap();
+        let configured = [okay.clone(), offline.clone(), okay.clone(), okay];
+        let mut next = 0;
+        // Model Shell's documented verified-path failure without changing the user's
+        // Known Folder registry. The subsequent directory scan is real filesystem IO.
+        let (roots, unavailable) = source_roots(|_, flags| {
+            let path = configured[next].clone();
+            next += 1;
+            if flags & 0x4000 == 0 && !path.is_dir() {
+                Err(io::Error::new(io::ErrorKind::NotFound, "offline source"))
+            } else {
+                Ok(path)
+            }
+        });
+        assert_eq!(unavailable, 0);
+        assert!(roots.contains(&offline));
+        let previous = Catalog::new(vec![AppEntry::new(
+            "old",
+            LaunchTarget::ShellPath(offline.join("old.lnk")),
+        )]);
+        let scan = discover(&roots, Some(&previous)).unwrap();
+        assert_eq!(scan.failed, [offline]);
+        assert_eq!(scan.entries.len(), 2);
+        assert!(scan.entries.iter().any(|entry| entry.name == "old"));
+        fs::remove_dir_all(root).unwrap();
+        unsafe {
+            CoUninitialize();
+        }
+    }
+
+    #[test]
+    fn overlapping_sources_keep_distinct_unicode_files() {
+        unsafe {
+            assert!(CoInitializeEx(null_mut(), 2) >= 0);
+        }
+        let root =
+            std::env::temp_dir().join(format!("picorun-unicode-scan-{}", std::process::id()));
+        fs::create_dir_all(&root).unwrap();
+        let first = root.join("İ.exe");
+        let second = root.join("i\u{0307}.exe");
+        fs::write(&first, "synthetic first; never executed").unwrap();
+        fs::write(&second, "synthetic second; never executed").unwrap();
+        assert_eq!(fs::read_dir(&root).unwrap().count(), 2);
+        let uppercase = PathBuf::from(root.as_os_str().to_ascii_uppercase());
+        let scan = discover(&[root.clone(), uppercase], None).unwrap();
+        assert!(scan.failed.is_empty());
+        assert_eq!(scan.entries.len(), 2);
+        for path in [first, second] {
+            assert!(scan
+                .entries
+                .iter()
+                .any(|entry| entry.target == LaunchTarget::ShellPath(path.clone())));
+        }
+        fs::remove_dir_all(root).unwrap();
+        unsafe {
+            CoUninitialize();
+        }
+    }
+
+    #[test]
+    fn failed_source_recovery_uses_case_and_component_aware_paths() {
+        let entry = |path: &str| AppEntry::new("same", LaunchTarget::ShellPath(path.into()));
+        let mut scan = Scan {
+            entries: vec![entry("c:\\apps\\ascii.exe"), entry("c:\\apps\\İ.exe")],
+            failed: vec![PathBuf::from("C:\\APPS")],
+        };
+        let previous = Catalog::new(vec![
+            entry("C:\\Apps\\ASCII.exe"),
+            entry("C:\\Apps\\i\u{0307}.exe"),
+            entry("C:\\Apps-other\\outside.exe"),
+        ]);
+        scan.preserve_unreadable(&previous);
+        assert_eq!(scan.entries.len(), 3);
+        assert!(scan.entries.iter().any(|entry| {
+            entry.target == LaunchTarget::ShellPath("C:\\Apps\\i\u{0307}.exe".into())
+        }));
+    }
+
     #[test]
     fn partial_failure_preserves_only_unreadable_entries() {
         unsafe {

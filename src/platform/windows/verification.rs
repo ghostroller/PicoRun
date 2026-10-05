@@ -7,6 +7,7 @@ mod flicker_probe;
 mod icons_probe;
 mod ime_probe;
 mod input_session_probe;
+mod instance_probe;
 mod language_probe;
 mod mouse_probe;
 mod startup_probe;
@@ -536,6 +537,24 @@ fn open_tray_menu(hwnd: Hwnd, pid: u32) -> io::Result<Hwnd> {
 }
 pub fn run() -> io::Result<()> {
     let args: Vec<_> = std::env::args_os().skip(1).collect();
+    if args.first().is_some_and(|a| a == "--instance") {
+        return instance_probe::run();
+    }
+    if args.first().is_some_and(|a| a == "--english") {
+        return english_probe::run();
+    }
+    if args.first().is_some_and(|a| a == "--instance-source") {
+        if args.len() != 4 {
+            return Err(io::Error::other(
+                "instance source needs data, source and marker paths",
+            ));
+        }
+        return instance_probe::source(
+            PathBuf::from(&args[1]),
+            PathBuf::from(&args[2]),
+            PathBuf::from(&args[3]),
+        );
+    }
     if args.first().is_some_and(|a| a == "--controlled-child") {
         let marker = PathBuf::from(
             args.get(1)
@@ -1069,7 +1088,7 @@ pub fn run() -> io::Result<()> {
         super::settings::save_english(&input_path, true)?;
         let mut restarted = spawn(&exe, &launch_args)?;
         let (hwnd, _) = wait_window(&mut restarted)?;
-        english_probe::restarted(hwnd, &mut checks)?;
+        english_probe::restarted(hwnd, restarted.0.id(), &mut checks)?;
         if icons {
             expect(
                 unsafe { SendMessageW(hwnd, 0x8006, 17, 0) } == 1,

@@ -98,21 +98,41 @@ public static class PackageWindow {
 '@
 }
 function Start-Launcher([string]$Executable) {
+    $Executable = (Resolve-Path -LiteralPath $Executable).Path
     $dataPath = Join-Path $testPath 'user-data'
     $sourcePath = Join-Path $testPath 'empty-source'
     New-Item -ItemType Directory -Path $dataPath,$sourcePath -Force | Out-Null
     $arguments = '--hidden --hotkey Ctrl+Alt+F10 --data-dir "' + $dataPath + '" --source "' + $sourcePath + '"'
     $process = Start-Process -FilePath $Executable -ArgumentList $arguments -WindowStyle Hidden -PassThru
-    $deadline = [DateTime]::UtcNow.AddSeconds(10)
-    do {
-        $window = [PackageWindow]::FindWindow('PicoRun.Native.v1','PicoRun')
-        [uint32]$owner = 0
-        [void][PackageWindow]::GetWindowThreadProcessId($window,[ref]$owner)
-        if ($owner -eq $process.Id) { return @{ Process=$process; Window=$window; Executable=$Executable } }
-        if ($process.HasExited) { throw 'Packaged launcher exited before creating its window.' }
-        Start-Sleep -Milliseconds 25
-    } while ([DateTime]::UtcNow -lt $deadline)
-    throw 'Packaged launcher window timed out.'
+    try {
+        # Hold the exact process object before inspecting windows; cleanup never finds
+        # a process by name or targets an existing launcher after a startup failure.
+        $null = $process.Handle
+        $deadline = [DateTime]::UtcNow.AddSeconds(10)
+        do {
+            $window = [PackageWindow]::FindWindow('PicoRun.Native.v1','PicoRun')
+            [uint32]$owner = 0
+            [void][PackageWindow]::GetWindowThreadProcessId($window,[ref]$owner)
+            if ($owner -eq $process.Id) { return @{ Process=$process; Window=$window; Executable=$Executable } }
+            if ($process.HasExited) { throw 'Packaged launcher exited before creating its window.' }
+            Start-Sleep -Milliseconds 25
+        } while ([DateTime]::UtcNow -lt $deadline)
+        throw 'Packaged launcher window timed out.'
+    } catch {
+        $startupFailure = $_
+        try {
+            if (-not $process.HasExited) {
+                if (-not [string]::Equals($process.Path, $Executable, [StringComparison]::OrdinalIgnoreCase)) {
+                    throw 'Startup cleanup refused a process whose executable path changed.'
+                }
+                $process.Kill()
+                if (-not $process.WaitForExit(10000)) { throw 'Startup cleanup could not stop its launcher.' }
+            }
+        } catch {
+            throw "Startup failed: $startupFailure Cleanup failed: $_"
+        } finally { $process.Dispose() }
+        throw $startupFailure
+    }
 }
 function Close-Launcher($Launcher) {
     if ($Launcher.Process.HasExited) { return }
