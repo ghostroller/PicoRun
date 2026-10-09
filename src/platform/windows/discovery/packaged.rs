@@ -328,6 +328,15 @@ pub(super) fn launch(id: &str) -> io::Result<()> {
     if package_family(id).is_none() {
         return Err(io::Error::other(Failure::Packaged(E_INVALIDARG)));
     }
+    if super::super::requires_launch_isolation()? {
+        return super::super::launch::detached_activation(id);
+    }
+    launch_direct(id)
+}
+pub(super) fn launch_direct(id: &str) -> io::Result<()> {
+    if package_family(id).is_none() {
+        return Err(io::Error::other(Failure::Packaged(E_INVALIDARG)));
+    }
     // A long-lived launcher can activate in-process. This avoids launching
     // explorer.exe or an external script; Windows owns the packaged app contract.
     let mut pointer = null_mut();

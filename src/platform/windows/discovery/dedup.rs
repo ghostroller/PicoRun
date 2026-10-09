@@ -423,13 +423,9 @@ impl Collector {
             first: next,
             checked: false,
         });
-        // Remember only the first member's already-read target. Identical targets share
-        // one allocation; overflow merely falls back to a second COM read on collision.
-        let initial_target = if group.first == next {
-            self.targets.remember(target.as_deref())
-        } else {
-            None
-        };
+        // Retain already-read targets in the bounded pool for collision checks and
+        // executable-name aliases. Overflow re-reads only when needed after scanning.
+        let initial_target = self.targets.remember(target.as_deref());
         if group.first != next {
             if !group.checked {
                 let first = &self.candidates[group.first];
@@ -468,7 +464,7 @@ impl Collector {
                             name,
                             path,
                             priority,
-                            target: None,
+                            target: initial_target,
                         };
                     }
                     return;
@@ -485,7 +481,7 @@ impl Collector {
     }
     pub fn into_entries(self) -> Vec<AppEntry> {
         let Self {
-            mut candidates,
+            candidates,
             groups,
             keys,
             targets,
@@ -494,12 +490,31 @@ impl Collector {
         drop(groups);
         drop(keys);
         drop(targets);
-        for candidate in &mut candidates {
-            candidate.target = None;
-        }
+
+        // Most entries reuse the scan's shared targets. A single bounded reader
+        // lazily recovers targets evicted by its metadata budget, preserving aliases.
+        let mut reader = None;
+        let mut reader_attempted = false;
         candidates
             .into_iter()
-            .map(|c| AppEntry::new(c.name, LaunchTarget::ShellPath(c.path)))
+            .map(|c| {
+                let recovered = if c.target.is_none()
+                    && c.path
+                        .extension()
+                        .is_some_and(|ext| ext.eq_ignore_ascii_case("lnk"))
+                {
+                    if !reader_attempted {
+                        reader = ShortcutReader::new().ok();
+                        reader_attempted = true;
+                    }
+                    reader
+                        .as_mut()
+                        .and_then(|reader| reader.application_target(&c.path))
+                } else {
+                    None
+                };
+                names::entry(c.name, c.path, c.target.as_deref().or(recovered.as_deref()))
+            })
             .collect()
     }
 }

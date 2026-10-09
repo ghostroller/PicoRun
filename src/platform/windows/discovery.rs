@@ -1,6 +1,8 @@
-use super::{ffi::*, wide};
+use super::{ffi::*, shell_file_path, wide};
 use crate::i18n::Text;
+mod app_paths;
 mod dedup;
+mod names;
 mod packaged;
 mod path_key;
 use crate::{
@@ -19,16 +21,16 @@ use std::{
 // Known Folder IDs: Shell handles redirected paths and allocates the UTF-16 result.
 const FOLDERS: [Guid; 4] = [
     Guid {
-        a: 0xa77f5d77,
-        b: 0x2e2b,
-        c: 0x44c3,
-        d: [0xa6, 0xa2, 0xab, 0xa6, 0x01, 0x05, 0x4a, 0x51],
+        a: 0x625b53c3,
+        b: 0xab48,
+        c: 0x4ec1,
+        d: [0xba, 0x1f, 0xa1, 0xef, 0x41, 0x46, 0xfc, 0x19],
     },
     Guid {
-        a: 0x0139d44e,
-        b: 0x6afe,
-        c: 0x49f2,
-        d: [0x86, 0x90, 0x3d, 0xaf, 0xca, 0xe6, 0xff, 0xb8],
+        a: 0xa4115719,
+        b: 0xd62e,
+        c: 0x491d,
+        d: [0xaa, 0x7c, 0xe7, 0x4b, 0x8b, 0xe3, 0xb0, 0x67],
     },
     Guid {
         a: 0xb4bfcc3a,
@@ -41,6 +43,21 @@ const FOLDERS: [Guid; 4] = [
         b: 0xf20f,
         c: 0x4863,
         d: [0xaf, 0xef, 0xf8, 0x7e, 0xf2, 0xe6, 0xba, 0x25],
+    },
+];
+// KnownFolders.h: query redirected Startup paths rather than English directory names.
+const STARTUPS: [Guid; 2] = [
+    Guid {
+        a: 0xb97d20bb,
+        b: 0xf46a,
+        c: 0x4c97,
+        d: [0xba, 0x10, 0x5e, 0x36, 0x08, 0x43, 0x08, 0x54],
+    },
+    Guid {
+        a: 0x82a5ea35,
+        b: 0xd9cd,
+        c: 0x47c5,
+        d: [0x96, 0x29, 0xe1, 0x5d, 0x2f, 0x71, 0x4e, 0x6e],
     },
 ];
 pub fn known_folder(id: &Guid) -> io::Result<PathBuf> {
@@ -164,7 +181,7 @@ impl ShortcutReader {
         unsafe {
             let load: unsafe extern "system" fn(*mut c_void, *const u16, u32) -> i32 =
                 std::mem::transmute(self.persist.method(5));
-            if load(self.persist.0, wide(path).as_ptr(), 0) < 0 {
+            if load(self.persist.0, shell_file_path(path).as_ptr(), 0) < 0 {
                 return None;
             }
             let get: unsafe extern "system" fn(
@@ -194,23 +211,34 @@ impl ShortcutReader {
             // Inspection excludes document/folder/URL shortcuts; launching still uses the .lnk.
             Path::new(&target)
                 .extension()
-                .is_some_and(|e| e.eq_ignore_ascii_case("exe"))
+                .is_some_and(|e| {
+                    e.eq_ignore_ascii_case("exe") || e.eq_ignore_ascii_case("appref-ms")
+                })
                 .then_some(target)
         }
     }
 }
 fn sort_entries(entries: &mut [AppEntry]) {
-    // The first precomputed search key is the normalized display name. No sort-time strings.
+    // No sort-time strings. Original paths precede registration and packaged targets.
     entries.sort_unstable_by(|a, b| {
+        fn kind(target: &LaunchTarget) -> u8 {
+            match target {
+                LaunchTarget::ShellPath(_) => 0,
+                LaunchTarget::AppPath(_) => 1,
+                LaunchTarget::AppUserModelId(_) => 2,
+            }
+        }
         a.keys[0]
             .cmp(&b.keys[0])
+            .then_with(|| kind(&a.target).cmp(&kind(&b.target)))
             .then_with(|| match (&a.target, &b.target) {
                 (LaunchTarget::ShellPath(a), LaunchTarget::ShellPath(b)) => a.cmp(b),
+                (LaunchTarget::AppPath(a), LaunchTarget::AppPath(b)) => a
+                    .executable
+                    .cmp(&b.executable)
+                    .then_with(|| a.path.cmp(&b.path)),
                 (LaunchTarget::AppUserModelId(a), LaunchTarget::AppUserModelId(b)) => a.cmp(b),
-                (LaunchTarget::ShellPath(_), LaunchTarget::AppUserModelId(_)) => {
-                    std::cmp::Ordering::Less
-                }
-                _ => std::cmp::Ordering::Greater,
+                _ => std::cmp::Ordering::Equal,
             })
     });
 }
@@ -218,13 +246,15 @@ pub struct Scan {
     pub entries: Vec<AppEntry>,
     pub failed: Vec<PathBuf>,
     pub packaged_failed: bool,
+    pub app_paths_failed: bool,
+    excluded: Vec<PathBuf>,
 }
 impl Scan {
     pub fn failure_count(&self) -> usize {
-        self.failed.len() + usize::from(self.packaged_failed)
+        self.failed.len() + usize::from(self.packaged_failed) + usize::from(self.app_paths_failed)
     }
     pub fn preserve_unreadable(&mut self, previous: &Catalog) {
-        if self.failed.is_empty() && !self.packaged_failed {
+        if self.failed.is_empty() && !self.packaged_failed && !self.app_paths_failed {
             return;
         }
         let mut seen: HashSet<_> = self
@@ -239,10 +269,18 @@ impl Scan {
             })
             .collect();
         let failed: Vec<_> = self.failed.iter().map(|root| PathKey::new(root)).collect();
+        let excluded: Vec<_> = self
+            .excluded
+            .iter()
+            .map(|root| PathKey::new(root))
+            .collect();
         for entry in previous.entries() {
             if let LaunchTarget::ShellPath(path) = &entry.target {
                 let key = PathKey::new(path);
-                if failed.iter().any(|root| key.is_within(root)) && seen.insert(key) {
+                if !excluded.iter().any(|root| key.is_within(root))
+                    && failed.iter().any(|root| key.is_within(root))
+                    && seen.insert(key)
+                {
                     self.entries.push(entry.clone());
                 }
             }
@@ -264,26 +302,101 @@ impl Scan {
                 }
             }
         }
+        if self.app_paths_failed {
+            // Registration names are part of discovery identity even when the
+            // executable/environment match; never lose a second searchable name.
+            let mut seen: HashSet<_> = self
+                .entries
+                .iter()
+                .filter_map(|entry| match &entry.target {
+                    LaunchTarget::AppPath(app) => Some((entry.name.clone(), app.as_ref().clone())),
+                    _ => None,
+                })
+                .collect();
+            for entry in previous.entries() {
+                if let LaunchTarget::AppPath(app) = &entry.target {
+                    if seen.insert((entry.name.clone(), app.as_ref().clone())) {
+                        self.entries.push(entry.clone());
+                    }
+                }
+            }
+        }
         // Failed sources have unknown current launch metadata: retain them conservatively.
         sort_entries(&mut self.entries);
     }
 }
+/// A Known Folder API failure leaves its old root unknown at cold startup too.
+/// Retain only old filesystem entries outside successfully resolved current roots;
+/// removals inside those roots still take effect, and independent source types do not leak.
+pub fn preserve_unresolved_folders(scan: &mut Scan, previous: &Catalog, roots: &[PathBuf]) {
+    let known: Vec<_> = roots.iter().map(|root| PathKey::new(root)).collect();
+    let excluded: Vec<_> = scan
+        .excluded
+        .iter()
+        .map(|root| PathKey::new(root))
+        .collect();
+    let mut seen: HashSet<_> = scan
+        .entries
+        .iter()
+        .filter_map(|entry| match &entry.target {
+            LaunchTarget::ShellPath(path) => Some(PathKey::new(path)),
+            _ => None,
+        })
+        .collect();
+    for entry in previous.entries() {
+        if let LaunchTarget::ShellPath(path) = &entry.target {
+            let key = PathKey::new(path);
+            if !known.iter().any(|root| key.is_within(root))
+                && !excluded.iter().any(|root| key.is_within(root))
+                && seen.insert(key)
+            {
+                scan.entries.push(entry.clone());
+            }
+        }
+    }
+    sort_entries(&mut scan.entries);
+}
 pub fn discover(roots: &[PathBuf], previous: Option<&Catalog>) -> io::Result<Scan> {
     discover_sources(roots, previous, false)
 }
-/// Only default sources include the Shell's packaged apps. Explicit --source remains isolated.
+/// Only default sources include registry and packaged apps. Explicit --source remains isolated.
 pub fn discover_sources(
     roots: &[PathBuf],
     previous: Option<&Catalog>,
     include_packaged: bool,
 ) -> io::Result<Scan> {
-    if roots.is_empty() && !include_packaged {
+    let mut excluded = Vec::new();
+    let mut exclusions_failed = false;
+    if include_packaged {
+        for id in STARTUPS {
+            match known_folder_with_flags(&id, 0x4000) {
+                Ok(path) => excluded.push(path),
+                Err(_) => exclusions_failed = true,
+            }
+        }
+    }
+    discover_inner(
+        roots,
+        previous,
+        include_packaged,
+        excluded,
+        exclusions_failed,
+    )
+}
+fn discover_inner(
+    roots: &[PathBuf],
+    previous: Option<&Catalog>,
+    include_system: bool,
+    excluded: Vec<PathBuf>,
+    exclusions_failed: bool,
+) -> io::Result<Scan> {
+    if roots.is_empty() && !include_system {
         return Err(io::Error::other(Text::RootsMissing));
     }
     let mut reader = ShortcutReader::new()?;
     let mut deduper = dedup::Collector::default();
     let mut failed = Vec::new();
-    // Known folders arrive in user Programs, common Programs, user/public Desktop order.
+    // Known folders arrive in user StartMenu, common StartMenu, user/public Desktop order.
     // Explicit --source roots use their supplied order. Priority travels through recursion.
     let mut stack: Vec<_> = roots
         .iter()
@@ -291,8 +404,21 @@ pub fn discover_sources(
         .rev()
         .map(|(priority, p)| (p.clone(), 0, priority))
         .collect();
+    let excluded_keys: Vec<_> = excluded.iter().map(|path| PathKey::new(path)).collect();
     let mut seen = HashSet::new();
     while let Some((directory, depth, priority)) = stack.pop() {
+        if excluded_keys
+            .iter()
+            .any(|root| PathKey::new(&directory).is_within(root))
+        {
+            continue;
+        }
+        if exclusions_failed {
+            // Keep known entries if the default Startup exclusions cannot be resolved;
+            // registry and packaged sources still refresh independently.
+            failed.push(directory);
+            continue;
+        }
         let children = match fs::read_dir(&directory) {
             Ok(children) => children,
             Err(_) => {
@@ -336,7 +462,10 @@ pub fn discover_sources(
                 continue;
             };
             let shortcut = extension.eq_ignore_ascii_case("lnk");
-            if !shortcut && !extension.eq_ignore_ascii_case("exe") {
+            if !shortcut
+                && !extension.eq_ignore_ascii_case("exe")
+                && !extension.eq_ignore_ascii_case("appref-ms")
+            {
                 continue;
             }
             // Skip overlapping roots before COM loads the same shortcut again.
@@ -368,7 +497,12 @@ pub fn discover_sources(
     // Release all grouping keys before allocating pinyin aliases for the survivors.
     let mut entries = deduper.into_entries();
     let mut packaged_failed = false;
-    if include_packaged {
+    let mut app_paths_failed = false;
+    if include_system {
+        match app_paths::discover() {
+            Ok(apps) => entries.extend(apps),
+            Err(_) => app_paths_failed = true,
+        }
         match packaged::discover() {
             Ok(apps) => entries.extend(apps),
             Err(_) => packaged_failed = true,
@@ -379,6 +513,8 @@ pub fn discover_sources(
         entries,
         failed,
         packaged_failed,
+        app_paths_failed,
+        excluded,
     };
     if let Some(previous) = previous {
         scan.preserve_unreadable(previous);
@@ -387,10 +523,12 @@ pub fn discover_sources(
         entries,
         failed,
         packaged_failed,
+        app_paths_failed,
+        excluded,
     } = scan;
     if roots.iter().all(|root| failed.contains(root))
         && entries.is_empty()
-        && (!include_packaged || packaged_failed)
+        && (!include_system || (packaged_failed && app_paths_failed))
     {
         return Err(io::Error::other(Text::RootsUnreadable));
     }
@@ -398,19 +536,37 @@ pub fn discover_sources(
         entries,
         failed,
         packaged_failed,
+        app_paths_failed,
+        excluded,
     })
 }
 
+pub(super) fn activate_packaged_direct(id: &str) -> io::Result<()> {
+    packaged::launch_direct(id)
+}
 pub fn launch(hwnd: Hwnd, target: &LaunchTarget) -> io::Result<()> {
     let path = match target {
         LaunchTarget::ShellPath(path) => path,
         LaunchTarget::AppUserModelId(id) => return packaged::launch(id),
+        LaunchTarget::AppPath(app) => return app_paths::launch(hwnd, app),
     };
+    launch_shell_path(hwnd, path)
+}
+pub(super) fn launch_shell_path(hwnd: Hwnd, path: &Path) -> io::Result<()> {
+    if !path.is_file() {
+        return Err(io::Error::new(io::ErrorKind::NotFound, Text::EntryMissing));
+    }
+    if super::requires_launch_isolation()? {
+        return super::launch::detached_helper(path, None);
+    }
+    launch_shell_path_direct(hwnd, path)
+}
+pub(super) fn launch_shell_path_direct(hwnd: Hwnd, path: &Path) -> io::Result<()> {
     if !path.is_file() {
         return Err(io::Error::new(io::ErrorKind::NotFound, Text::EntryMissing));
     }
     // No .lnk parameter or working-directory overrides.
-    let file = wide(path);
+    let file = shell_file_path(path);
     let verb = wide("open");
     let mut info = ShellExecuteInfo {
         size: std::mem::size_of::<ShellExecuteInfo>() as u32,
@@ -459,6 +615,8 @@ mod tests {
             entries: vec![packaged("新名称", "Sample.App_1234567890abc!App")],
             failed: Vec::new(),
             packaged_failed: true,
+            app_paths_failed: false,
+            excluded: Vec::new(),
         };
         scan.preserve_unreadable(&previous);
         assert_eq!(scan.failure_count(), 1);
@@ -471,6 +629,8 @@ mod tests {
             entries: Vec::new(),
             failed: vec!["readable".into()],
             packaged_failed: false,
+            app_paths_failed: false,
+            excluded: Vec::new(),
         };
         successful.preserve_unreadable(&previous);
         assert_eq!(successful.entries.len(), 1);
@@ -572,6 +732,8 @@ mod tests {
             entries: vec![entry("c:\\apps\\ascii.exe"), entry("c:\\apps\\İ.exe")],
             failed: vec![PathBuf::from("C:\\APPS")],
             packaged_failed: false,
+            app_paths_failed: false,
+            excluded: Vec::new(),
         };
         let previous = Catalog::new(vec![
             entry("C:\\Apps\\ASCII.exe"),
@@ -585,6 +747,136 @@ mod tests {
         }));
     }
 
+    #[test]
+    fn expanded_root_scans_clickonce_but_excludes_startup_and_old_startup_cache() {
+        assert!(unsafe { CoInitializeEx(null_mut(), 2) } >= 0);
+        let root = std::env::temp_dir().join(format!("picorun-start-root-{}", std::process::id()));
+        let programs = root.join("Programs");
+        let startup = programs.join("Redirected launch folder");
+        fs::create_dir_all(&startup).unwrap();
+        fs::write(root.join("根应用.exe"), "synthetic; never launched").unwrap();
+        fs::write(
+            programs.join("部署应用.appref-ms"),
+            "synthetic; never launched",
+        )
+        .unwrap();
+        fs::write(startup.join("Excluded.exe"), "synthetic; never launched").unwrap();
+        fs::write(root.join("document.txt"), "not application").unwrap();
+        let scan = discover_inner(
+            std::slice::from_ref(&root),
+            None,
+            false,
+            vec![startup.clone()],
+            false,
+        )
+        .unwrap();
+        assert_eq!(scan.entries.len(), 2);
+        assert!(scan.entries.iter().any(|entry| entry.name == "根应用"));
+        assert!(scan
+            .entries
+            .iter()
+            .any(|entry| entry.target
+                == LaunchTarget::ShellPath(programs.join("部署应用.appref-ms"))));
+        let previous = Catalog::new(vec![AppEntry::new(
+            "Excluded",
+            LaunchTarget::ShellPath(startup.join("old.exe")),
+        )]);
+        let mut failed = Scan {
+            entries: Vec::new(),
+            failed: vec![root.clone()],
+            packaged_failed: false,
+            app_paths_failed: false,
+            excluded: vec![startup],
+        };
+        failed.preserve_unreadable(&previous);
+        assert!(failed.entries.is_empty());
+        fs::remove_dir_all(root).unwrap();
+        unsafe {
+            CoUninitialize();
+        }
+    }
+    #[test]
+    fn registry_failure_recovers_only_registered_targets_and_success_removes_them() {
+        let app = LaunchTarget::AppPath(Box::new(crate::model::RegisteredApp {
+            executable: "C:/Apps/registered.exe".into(),
+            path: Some("C:/Dependencies".into()),
+        }));
+        let previous = Catalog::new(vec![
+            AppEntry::new("Registered", app.clone()),
+            AppEntry::new("gone", LaunchTarget::ShellPath("readable/gone.exe".into())),
+        ]);
+        let mut failed = Scan {
+            entries: Vec::new(),
+            failed: Vec::new(),
+            packaged_failed: false,
+            app_paths_failed: true,
+            excluded: Vec::new(),
+        };
+        failed.preserve_unreadable(&previous);
+        assert_eq!(failed.failure_count(), 1);
+        assert_eq!(failed.entries.len(), 1);
+        assert_eq!(failed.entries[0].target, app);
+        let mut success = Scan {
+            entries: Vec::new(),
+            failed: Vec::new(),
+            packaged_failed: false,
+            app_paths_failed: false,
+            excluded: Vec::new(),
+        };
+        success.preserve_unreadable(&previous);
+        assert!(success.entries.is_empty());
+    }
+    #[test]
+    fn unresolved_known_folder_keeps_old_entries_but_not_removed_known_or_independent_sources() {
+        let previous = Catalog::new(vec![
+            AppEntry::new(
+                "keep",
+                LaunchTarget::ShellPath("C:/Unknown/keep.exe".into()),
+            ),
+            AppEntry::new(
+                "removed",
+                LaunchTarget::ShellPath("C:/Known/removed.exe".into()),
+            ),
+            AppEntry::new(
+                "startup",
+                LaunchTarget::ShellPath("C:/Unknown/Startup/auto.exe".into()),
+            ),
+            AppEntry::new("package", LaunchTarget::AppUserModelId("Family!App".into())),
+        ]);
+        let mut scan = Scan {
+            entries: Vec::new(),
+            failed: Vec::new(),
+            packaged_failed: false,
+            app_paths_failed: false,
+            excluded: vec!["C:/Unknown/Startup".into()],
+        };
+        preserve_unresolved_folders(&mut scan, &previous, &["C:/Known".into()]);
+        assert_eq!(scan.entries.len(), 1);
+        assert_eq!(scan.entries[0].name, "keep");
+        preserve_unresolved_folders(&mut scan, &previous, &["C:/Known".into()]);
+        assert_eq!(scan.entries.len(), 1);
+    }
+    #[test]
+    fn registered_source_recovery_keeps_distinct_names_for_the_same_launch_mapping() {
+        let app = LaunchTarget::AppPath(Box::new(crate::model::RegisteredApp {
+            executable: "C:/Apps/a.exe".into(),
+            path: None,
+        }));
+        let previous = Catalog::new(vec![
+            AppEntry::new("中文名称", app.clone()),
+            AppEntry::new("Alternate", app.clone()),
+        ]);
+        let mut scan = Scan {
+            entries: vec![AppEntry::new("中文名称", app)],
+            failed: Vec::new(),
+            packaged_failed: false,
+            app_paths_failed: true,
+            excluded: Vec::new(),
+        };
+        scan.preserve_unreadable(&previous);
+        assert_eq!(scan.entries.len(), 2);
+        assert!(scan.entries.iter().any(|entry| entry.name == "Alternate"));
+    }
     #[test]
     fn partial_failure_preserves_only_unreadable_entries() {
         unsafe {

@@ -95,6 +95,10 @@ impl Renderer {
         }
         Ok(renderer)
     }
+    pub fn icon_size(&self) -> u16 {
+        self.scale(20)
+            .clamp(1, i32::from(crate::platform::windows::icons::MAX_SIZE)) as u16
+    }
     pub fn scale(&self, value: u16) -> i32 {
         (u32::from(value) * self.dpi / 96) as i32
     }
@@ -297,7 +301,7 @@ impl Renderer {
             }
             let text_left = pad * 2
                 + if view.show_icons && !view.rows.is_empty() {
-                    self.scale(20) + self.scale(8)
+                    i32::from(self.icon_size()) + self.scale(8)
                 } else {
                     0
                 };
@@ -378,7 +382,7 @@ impl Renderer {
         }
         text.left += pad;
         if view.show_icons && !view.rows.is_empty() {
-            let size = self.scale(20);
+            let size = i32::from(self.icon_size());
             if let Some(Some(icon)) = view.icons.get(index) {
                 DrawIconEx(
                     dc,
@@ -452,7 +456,7 @@ impl Renderer {
         let region = Rect {
             left,
             top: self.top(),
-            right: left + self.scale(20),
+            right: left + i32::from(self.icon_size()),
             bottom: self.top() + self.scale(self.theme.row_height) * rows as i32,
         };
         // Only the icon column changed. Existing list text/background remain valid; GDI's

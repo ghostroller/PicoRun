@@ -8,6 +8,58 @@ use std::path::PathBuf;
 
 fn main() {
     let arguments: Vec<_> = std::env::args_os().skip(1).collect();
+    #[cfg(windows)]
+    if arguments
+        .first()
+        .is_some_and(|arg| arg == "--app-path-helper")
+    {
+        let result = if arguments.len() == 2 {
+            picorun::platform::windows::app_path_helper(std::path::Path::new(&arguments[1]))
+        } else {
+            Err(std::io::Error::other("invalid registered launch request"))
+        };
+        if let Err(error) = result {
+            eprintln!("{error}");
+            std::process::exit(1);
+        }
+        return;
+    }
+    #[cfg(windows)]
+    if arguments
+        .first()
+        .is_some_and(|arg| arg == "--shell-launch-helper" || arg == "--packaged-activation-helper")
+    {
+        let result = if arguments.len() == 2 {
+            if arguments[0] == "--packaged-activation-helper" {
+                arguments[1].to_str().map_or_else(
+                    || Err(std::io::Error::from_raw_os_error(87)),
+                    picorun::platform::windows::packaged_activation_helper,
+                )
+            } else {
+                picorun::platform::windows::shell_launch_helper(std::path::Path::new(&arguments[1]))
+            }
+        } else {
+            Err(std::io::Error::from_raw_os_error(87))
+        };
+        if let Err(error) = result {
+            let code = error
+                .raw_os_error()
+                .filter(|&code| code != 0)
+                .unwrap_or_else(|| {
+                    match error
+                        .get_ref()
+                        .and_then(|cause| cause.downcast_ref::<picorun::i18n::Failure>())
+                    {
+                        Some(picorun::i18n::Failure::Launch(code)) if *code != 0 => *code as i32,
+                        Some(picorun::i18n::Failure::Packaged(code)) if *code != 0 => *code,
+                        _ if error.kind() == std::io::ErrorKind::NotFound => 2,
+                        _ => 31,
+                    }
+                });
+            std::process::exit(code);
+        }
+        return;
+    }
     if arguments.first().is_some_and(|s| s == "--demo") {
         #[cfg(windows)]
         picorun::platform::windows::attach_console();

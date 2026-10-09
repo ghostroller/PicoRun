@@ -1,5 +1,5 @@
 //! Worker-local metadata and icon caches. Only visible requests cause file access.
-use super::{generic, packaged, Icon, CAPACITY};
+use super::{generic, packaged, Extracted, Icon, CAPACITY};
 use crate::model::LaunchTarget;
 use std::{
     cell::Cell,
@@ -61,6 +61,7 @@ impl Entry {
 
 pub struct Loader {
     entries: VecDeque<Entry>,
+    size: u16,
     // File resources and AppsFolder share one large-icon cache and the existing renderer.
     icons: Vec<(Rc<Resource>, Arc<Icon>)>,
     generic: Option<Arc<Icon>>,
@@ -73,6 +74,7 @@ impl Loader {
     pub fn new() -> Self {
         Self {
             entries: VecDeque::new(),
+            size: 0,
             icons: Vec::with_capacity(CAPACITY),
             generic: None,
             generic_attempted: false,
@@ -80,6 +82,19 @@ impl Loader {
             expanded_buffer: vec![0; 32768],
             counters: Stats::default(),
         }
+    }
+    pub fn prepare(&mut self, size: u16, invalidate: bool) {
+        debug_assert!((1..=super::MAX_SIZE).contains(&size));
+        let changed = self.size != size;
+        if invalidate || (self.size != 0 && changed) {
+            self.clear();
+        }
+        if changed {
+            // Retain one physical size only, including its generic/negative state.
+            self.generic = None;
+            self.generic_attempted = false;
+        }
+        self.size = size;
     }
     fn bytes(&self) -> usize {
         // Shared resource strings are deliberately charged for every reference: conservative
@@ -130,7 +145,7 @@ impl Loader {
         self.counters.fallbacks += 1;
         if !self.generic_attempted {
             self.generic_attempted = true;
-            self.generic = generic();
+            self.generic = generic(self.size);
             self.counters.generic_copies += usize::from(self.generic.is_some());
         }
         self.generic.clone()
@@ -177,9 +192,12 @@ impl Loader {
         }
         self.counters.misses += 1;
         self.counters.extracts += 1;
-        let icon = extract(&resource.key);
+        let icon = extract(&resource.key, self.size, &mut self.resource_buffer);
         self.record_load(started);
-        if let Some(icon) = icon {
+        if let Some(Extracted { icon, cacheable }) = icon {
+            if !cacheable {
+                return Some(icon);
+            }
             if self.icons.len() == CAPACITY {
                 self.icons.remove(0);
             }
@@ -215,6 +233,11 @@ fn target_bytes(target: &LaunchTarget) -> usize {
     match target {
         LaunchTarget::ShellPath(path) => path.capacity(),
         LaunchTarget::AppUserModelId(id) => id.capacity(),
+        LaunchTarget::AppPath(app) => {
+            std::mem::size_of::<crate::model::RegisteredApp>()
+                + app.executable.capacity()
+                + app.path.as_ref().map_or(0, String::capacity)
+        }
     }
 }
 fn resolve(target: &LaunchTarget, resource: &mut [u16], expanded: &mut [u16]) -> Option<Key> {
@@ -222,6 +245,7 @@ fn resolve(target: &LaunchTarget, resource: &mut [u16], expanded: &mut [u16]) ->
         LaunchTarget::ShellPath(path) if !path.as_os_str().is_empty() => {
             resolve_file(path, resource, expanded)
         }
+        LaunchTarget::AppPath(app) => resolve_file(&app.executable, resource, expanded),
         LaunchTarget::AppUserModelId(id) if packaged::valid_id(id) => Some(Key {
             target: target.clone(),
             index: 0,
@@ -230,7 +254,7 @@ fn resolve(target: &LaunchTarget, resource: &mut [u16], expanded: &mut [u16]) ->
     }
 }
 fn resolve_file(path: &Path, resource: &mut [u16], expanded: &mut [u16]) -> Option<Key> {
-    let path_text = super::wide(path);
+    let path_text = super::shell_file_path(path);
     if path_text.len() > resource.len() {
         return None;
     }
@@ -305,25 +329,27 @@ fn resolve_file(path: &Path, resource: &mut [u16], expanded: &mut [u16]) -> Opti
         index,
     })
 }
-fn extract(key: &Key) -> Option<Arc<Icon>> {
-    let path = match &key.target {
-        LaunchTarget::ShellPath(path) => super::wide(path),
-        LaunchTarget::AppUserModelId(id) => return packaged::extract(id),
-    };
-    let mut icon = null_mut();
-    // Owned HICON is released by Icon::drop after worker cache and UI snapshots let it go.
-    let count =
-        unsafe { super::ExtractIconExW(path.as_ptr(), key.index, &mut icon, null_mut(), 1) };
-    if icon.is_null() {
-        None
-    } else if count == 1 {
-        Some(Arc::new(Icon(icon as usize)))
-    } else {
-        unsafe { super::DestroyIcon(icon) };
-        None
+fn extract(key: &Key, size: u16, location: &mut [u16]) -> Option<Extracted> {
+    match &key.target {
+        LaunchTarget::ShellPath(path) => {
+            super::extract_file(&super::shell_file_path(path), key.index, size).map(|icon| {
+                Extracted {
+                    icon,
+                    cacheable: true,
+                }
+            })
+        }
+        LaunchTarget::AppUserModelId(id) => packaged::extract(id, size, location),
+        LaunchTarget::AppPath(app) => {
+            super::extract_file(&super::shell_file_path(&app.executable), key.index, size).map(
+                |icon| Extracted {
+                    icon,
+                    cacheable: true,
+                },
+            )
+        }
     }
 }
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -339,6 +365,7 @@ mod tests {
     #[test]
     fn aliases_share_negative_state_but_different_indices_do_not() {
         let mut loader = Loader::new();
+        loader.prepare(25, false);
         let first = loader.intern(key(-154));
         first.absent.set(true);
         loader.store(&file("first.lnk"), Some(first.clone()));
@@ -355,6 +382,7 @@ mod tests {
     #[test]
     fn repeated_negative_requests_do_not_extract_or_copy_more_icons() {
         let mut loader = Loader::new();
+        loader.prepare(25, false);
         let absent = loader.intern(key(0));
         absent.absent.set(true);
         loader.store(&file("absent.lnk"), Some(absent));
@@ -371,6 +399,7 @@ mod tests {
     fn packaged_failures_share_cache_but_never_alias_files_or_other_aumids() {
         let target = LaunchTarget::AppUserModelId("Synthetic.Family!App".into());
         let mut loader = Loader::new();
+        loader.prepare(25, false);
         let resource = resolve(&target, &mut [], &mut []).unwrap();
         let resource = loader.intern(resource);
         resource.absent.set(true);
@@ -406,8 +435,29 @@ mod tests {
         assert!(!loader.intern(Key { target, index: 0 }).absent.get());
     }
     #[test]
+    fn physical_size_change_releases_old_icons_and_negative_state() {
+        let mut loader = Loader::new();
+        loader.prepare(25, false);
+        let resource = loader.intern(key(0));
+        resource.absent.set(true);
+        loader.store(&file("absent.lnk"), Some(resource));
+        let first = loader.load(&file("absent.lnk")).unwrap();
+        let weak = Arc::downgrade(&first);
+        drop(first);
+        loader.prepare(25, false);
+        assert!(weak.upgrade().is_some());
+        assert_eq!(loader.stats().metadata_entries, 1);
+        loader.prepare(40, false);
+        assert!(weak.upgrade().is_none());
+        assert_eq!(loader.stats().metadata_entries, 0);
+        assert_eq!(loader.stats().invalidations, 1);
+        assert!(!loader.intern(key(0)).absent.get());
+        assert_eq!(loader.size, 40);
+    }
+    #[test]
     fn metadata_has_count_and_byte_bounds() {
         let mut loader = Loader::new();
+        loader.prepare(25, false);
         for index in 0..2000 {
             let path =
                 LaunchTarget::ShellPath(PathBuf::from(format!("{}-{index}.lnk", "x".repeat(300))));

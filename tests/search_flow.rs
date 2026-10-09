@@ -105,3 +105,28 @@ fn failed_refresh_preserves_previous_catalog() {
     assert!(catalog.refresh(&mut FailingSource).is_err());
     assert_eq!(catalog.entries()[0].name, "微信");
 }
+
+#[test]
+fn localized_and_executable_aliases_search_the_original_launch_entry() {
+    let target = LaunchTarget::ShellPath(PathBuf::from("demo/Arguments Preserved.lnk"));
+    let mut editor = AppEntry::new("Localized Editor", target.clone());
+    assert!(editor.add_alias("腾讯QQ工具"));
+    assert!(editor.add_alias("qqeditor"));
+    let entries = vec![editor, entry("Other App")];
+    for query in ["腾讯qq工具", "tengxunqqgongju", "txqqgj", "QQEDITOR"] {
+        assert_eq!(find(&entries, query), ["Localized Editor"]);
+    }
+    let mut controller = Controller::new(Catalog::new(entries));
+    assert!(controller.set_query("txqqgj"));
+    assert_eq!(controller.selected_target(), Some(&target));
+}
+
+#[test]
+fn alias_exact_matches_keep_the_existing_rank_order() {
+    let mut aliased = entry("Editor");
+    assert!(aliased.add_alias("note"));
+    assert_eq!(
+        find(&[entry("Notebook"), aliased, entry("Note")], "note"),
+        ["Editor", "Note", "Notebook"]
+    );
+}

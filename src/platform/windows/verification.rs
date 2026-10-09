@@ -1,6 +1,7 @@
 //! Native verification helpers live here to keep all Win32 unsafe at the platform boundary.
 mod appearance_probe;
 mod dedup_probe;
+mod discovery_sources_probe;
 mod edit_drag_probe;
 mod english_probe;
 mod flicker_probe;
@@ -539,7 +540,14 @@ fn open_tray_menu(hwnd: Hwnd, pid: u32) -> io::Result<Hwnd> {
     }
 }
 pub fn run() -> io::Result<()> {
+    if discovery_sources_probe::is_environment_child() {
+        return discovery_sources_probe::environment_child();
+    }
     let args: Vec<_> = std::env::args_os().skip(1).collect();
+    if args.first().is_some_and(|a| a == "--discovery-sources") {
+        super::window::enable_dpi();
+        return discovery_sources_probe::run();
+    }
     if args.first().is_some_and(|a| a == "--packaged-host") {
         let data = PathBuf::from(
             args.get(1)
@@ -558,9 +566,13 @@ pub fn run() -> io::Result<()> {
         }
         return result;
     }
+    if args.first().is_some_and(|a| a == "--dpi-icons") {
+        super::window::enable_dpi();
+        return packaged_probe::run_icons(args.iter().any(|a| a == "--reference"), true);
+    }
     if args.first().is_some_and(|a| a == "--packaged-icons") {
         super::window::enable_dpi(); // Capture physical pixels rather than a virtualized client size.
-        return packaged_probe::run_icons(args.iter().any(|a| a == "--reference"));
+        return packaged_probe::run_icons(args.iter().any(|a| a == "--reference"), false);
     }
     if args.first().is_some_and(|a| a == "--packaged") {
         return packaged_probe::run(args.iter().any(|a| a == "--reference"));

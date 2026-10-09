@@ -1,5 +1,7 @@
 # Store 应用图标修复
 
+后续图标DPI尺寸修正见 [DPI_ICONS_RESULTS.md](DPI_ICONS_RESULTS.md)；本文保留 b251acc 实现与原测量口径。
+
 2026-10-09：最近的 `ea76fc9` 接通了 AppsFolder 发现与 AUMID 启动，但 `request_icons` 把所有打包目标变成空路径，worker 对空路径返回 None，因此结果行没有图标。旧文档的通用图标说明与实际实现不符。修复后，本机 22 个打包入口在三轮实际窗口测试中均取得图标；ChatGPT 和 Microsoft Store 的亮暗主题图案已逐张核对。
 
 ## 实现

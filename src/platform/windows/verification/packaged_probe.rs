@@ -266,18 +266,23 @@ fn icon_bounds(hwnd: Hwnd, checks: &mut String) -> io::Result<()> {
 
 /// Three independent processes, native Edit/GDI timing and full launcher memory.
 /// Personal names/identities remain confined to the ignored runtime cache.
-pub(super) fn run_icons(reference: bool) -> io::Result<()> {
-    let root = std::env::current_dir()?.join(if reference {
-        "runtime/probe-packaged-icons-reference"
-    } else {
-        "runtime/probe-packaged-icons"
+pub(super) fn run_icons(reference: bool, dpi_mode: bool) -> io::Result<()> {
+    let root = std::env::current_dir()?.join(match (dpi_mode, reference) {
+        (true, true) => "runtime/probe-dpi-icons-reference",
+        (true, false) => "runtime/probe-dpi-icons",
+        (false, true) => "runtime/probe-packaged-icons-reference",
+        (false, false) => "runtime/probe-packaged-icons",
     });
     let data = root.join("data");
     fs::create_dir_all(&data)?;
     fs::write(data.join("english-input.txt"), "on\n")?;
     fs::write(data.join("theme.txt"), "dark\n")?;
     let exe = if reference {
-        std::env::current_dir()?.join("runtime/packaged-icons-baseline/picorun.exe")
+        std::env::current_dir()?.join(if dpi_mode {
+            "runtime/dpi-icons-baseline/picorun.exe"
+        } else {
+            "runtime/packaged-icons-baseline/picorun.exe"
+        })
     } else {
         std::env::current_exe()?.with_file_name("picorun.exe")
     };
@@ -360,7 +365,7 @@ pub(super) fn run_icons(reference: bool) -> io::Result<()> {
         let cold_icons_ms = started.elapsed().as_secs_f64() * 1000.0;
         sample(child.0.id(), &format!("run{run}_cold_icons"), &mut memory)?;
         timings.push_str(&format!("run={run} cache_cold={} entries={} packaged={packaged_count} startup_ms={startup_ms:.4} cold_icons_ms={cold_icons_ms:.4}\n", run == 0, catalog.entries().len()));
-        if !reference {
+        if !reference || dpi_mode {
             expect(
                 icon_stat(hwnd, 6) == 1 && icon_stat(hwnd, 14) >= 1 && icon_stat(hwnd, 7) == 0,
                 "cold ChatGPT query has one extracted icon without fallback",
@@ -378,7 +383,7 @@ pub(super) fn run_icons(reference: bool) -> io::Result<()> {
                 select_packaged(hwnd, edit, &entry.name, id, &catalog, &mut checks, label)?;
             icons_ready(hwnd)?;
             checks.push_str(&format!("run={run} {label} result_count={visible} icons={} extracts={} fallbacks={} reference={reference}\n", icon_stat(hwnd, 6), icon_stat(hwnd, 14), icon_stat(hwnd, 7)));
-            if !reference {
+            if !reference || dpi_mode {
                 expect(
                     visible == 1
                         && icon_stat(hwnd, 6) == 1
@@ -406,7 +411,7 @@ pub(super) fn run_icons(reference: bool) -> io::Result<()> {
             icons_ready(hwnd)?;
             select_packaged(hwnd, edit, &entry.name, id, &catalog, &mut checks, label)?;
             icons_ready(hwnd)?;
-            if !reference {
+            if !reference || dpi_mode {
                 expect(
                     icon_stat(hwnd, 3) > hits_before && icon_stat(hwnd, 14) == extracts_before,
                     &format!("run={run}: repeated {label} request hits cache without extraction"),
@@ -414,6 +419,48 @@ pub(super) fn run_icons(reference: bool) -> io::Result<()> {
                 )?;
             }
         }
+        if dpi_mode && run == 0 {
+            for (index, entry) in reported.iter().enumerate() {
+                let label = ["chatgpt", "store"][index];
+                let LaunchTarget::AppUserModelId(id) = &entry.target else {
+                    unreachable!();
+                };
+                select_packaged(hwnd, edit, &entry.name, id, &catalog, &mut checks, label)?;
+                icons_ready(hwnd)?;
+                for dpi in [96, 120, 144, 192, 384, 120] {
+                    let before = icon_stat(hwnd, 7);
+                    expect(
+                        unsafe { SendMessageW(hwnd, 0x800d, dpi, 0) } == 1,
+                        "native diagnostic accepts simulated DPI change",
+                        &mut checks,
+                    )?;
+                    icons_ready(hwnd)?;
+                    expect(
+                        icon_stat(hwnd, 6) == 1 && icon_stat(hwnd, 7) == before,
+                        &format!("{label} dpi={dpi}: one visible icon without new fallback"),
+                        &mut checks,
+                    )?;
+                    // GetIconInfo/GetObject run only here, outside all query measurement intervals.
+                    let width = unsafe { SendMessageW(hwnd, 0x8010, 0, 0) };
+                    let height = unsafe { SendMessageW(hwnd, 0x8010, 1, 0) };
+                    let expected = 20 * dpi as isize / 96;
+                    checks.push_str(&format!("{label} dpi={dpi} icon_width={width} icon_height={height} expected={expected} extracts={} measurement_available={} reference={reference}\n", icon_stat(hwnd, 14), width > 0 && height > 0));
+                    if !reference {
+                        expect(
+                            width == expected && height == expected,
+                            &format!("{label} dpi={dpi}: HICON matches physical result icon size"),
+                            &mut checks,
+                        )?;
+                    }
+                    icon_bounds(hwnd, &mut checks)?;
+                    if [96, 120, 192].contains(&dpi) {
+                        screenshot(hwnd, &root.join(format!("{label}-dpi-{dpi}.bmp")))?;
+                    }
+                }
+            }
+            sample(child.0.id(), &format!("run{run}_dpi_sizes"), &mut memory)?;
+        }
+        // The sequence ends at 120 DPI, matching this machine's 125% scale for timing.
         for (index, entry) in catalog.entries().iter().enumerate() {
             let LaunchTarget::AppUserModelId(id) = &entry.target else {
                 continue;
@@ -429,7 +476,7 @@ pub(super) fn run_icons(reference: bool) -> io::Result<()> {
                 &format!("run={run} packaged_index={index}"),
             )?;
             icons_ready(hwnd)?;
-            if !reference {
+            if !reference || dpi_mode {
                 expect(
                     icon_stat(hwnd, 6) == visible as isize && icon_stat(hwnd, 7) == before,
                     &format!(
@@ -483,7 +530,7 @@ pub(super) fn run_icons(reference: bool) -> io::Result<()> {
         let started = Instant::now();
         icons_ready(hwnd)?;
         let refreshed_icons_ms = started.elapsed().as_secs_f64() * 1000.0;
-        if !reference {
+        if !reference || dpi_mode {
             expect(
                 icon_stat(hwnd, 15) > invalidations_before
                     && icon_stat(hwnd, 14) > extracts_before

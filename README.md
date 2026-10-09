@@ -63,13 +63,17 @@ UI language and English input are independent settings. Changing the interface l
 
 ## Finding apps and troubleshooting
 
-By default, PicoRun looks for apps in your user and shared **Start menu Programs** folders and **Desktop** folders, plus installed packaged apps for the current user through Windows **AppsFolder**. It refreshes this list at startup or when you press **F5**; there is no background polling.
+By default, PicoRun recursively searches your user and shared **Start menu** roots, including their **Programs** subfolders, and **Desktop** folders. Windows' known **Startup** folders are excluded. It also reads registered desktop apps from **App Paths** in both 32-bit and 64-bit views of HKCU and HKLM, and installed packaged apps for the current user through Windows **AppsFolder**. It refreshes this list at startup or when you press **F5**; there is no background polling.
 
-- **An app is missing:** press F5 after installing it. For a desktop app without a discoverable shortcut, add a shortcut pointing to its `.exe` to the Start menu or Desktop. Documents, folders, and web shortcuts are excluded.
+Folder sources accept `.exe`, ClickOnce `.appref-ms`, and `.lnk` shortcuts whose targets are one of those application types. App Paths registrations must point to an existing executable using an absolute path. Documents, folders, web or game protocol shortcuts, and PATH directory scanning are outside the discovery scope.
+
+- **An app is missing:** press F5 after installing it. For a desktop app with no valid App Paths registration or discoverable shortcut, add a shortcut pointing to its `.exe` to the Start menu or Desktop.
+- **A desktop app has a different name:** shortcuts use Windows' localized display name when available. Try the original shortcut filename or the target executable filename without its extension; alternate names and their pinyin are prepared during indexing.
 - **A Store app has a different name:** packaged apps use the localized name supplied by Windows. Try that name or its pinyin; opening uses the app's Windows activation ID (AUMID). With app icons enabled, PicoRun loads their icons from Windows AppsFolder.
-- **Using `--source`:** custom folders replace all default sources, including packaged apps. Omit this option to include installed Store apps.
+- **Using `--source`:** custom folders replace all default sources, including App Paths and packaged apps. Omit this option to include registered desktop and installed Store apps.
 - **An app was installed or removed:** press F5 or restart PicoRun to update the list.
-- **Similar names appear more than once:** shortcuts with different launch settings may be kept separately. PicoRun preserves their arguments and working directories when opening them.
+- **Similar names appear more than once:** shortcuts with different launch settings and registrations with different executable or Path settings may be kept separately. PicoRun preserves shortcut arguments and working directories when opening them.
+- **Closing the terminal after cargo run:** PicoRun itself may exit with that terminal. When PicoRun belongs to a process job or is attached to a console, newly created app processes use an independent launch path and do not inherit that terminal's job. This requires access to the same user's desktop shell.
 - **Alt+Space is already in use:** start PicoRun with another hotkey, such as `picorun.exe --hotkey Ctrl+Alt+P`. Quit any existing instance before changing the startup command.
 - **Pinyin does not match a name:** some characters have multiple pronunciations; coverage is incomplete. Try the Chinese name or another part of the app's name.
 
@@ -141,7 +145,7 @@ Detailed engineering notes are currently in Chinese:
 - [Development constraints](AGENTS.md), [implementation](docs/IMPLEMENTATION.md), and [research](docs/RESEARCH.md).
 - [UI language, current validation, and performance observations](docs/I18N_RESULTS.md).
 - [Input mode restoration](docs/INPUT_SESSION_RESULTS.md), [mouse controls](docs/MOUSE_LAUNCH_RESULTS.md), and [text selection rendering](docs/EDIT_DRAG_RESULTS.md).
-- [App discovery and deduplication](docs/DEDUP_RESULTS.md).
+- [Expanded app sources and name aliases](docs/DISCOVERY_SOURCES_RESULTS.md), and [deduplication](docs/DEDUP_RESULTS.md).
 
 Search benchmarks, full-process memory measurements, and native window response tests cover different costs. Their results should not be treated as interchangeable or as guarantees for low-end hardware.
 

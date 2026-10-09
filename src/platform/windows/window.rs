@@ -167,20 +167,27 @@ fn request_icons() {
     .flatten() else {
         return;
     };
-    let targets = state(|s| {
-        s.controller
-            .results()
-            .iter()
-            .map(|hit| {
-                s.controller.catalog().entries()[hit.entry_index]
-                    .target
-                    .clone()
-            })
-            .collect()
-    })
-    .unwrap_or_default();
+    let Some((targets, size)) = state(|s| {
+        (
+            s.controller
+                .results()
+                .iter()
+                .map(
+                    |hit| match &s.controller.catalog().entries()[hit.entry_index].target {
+                        crate::model::LaunchTarget::AppPath(app) => {
+                            crate::model::LaunchTarget::ShellPath(app.executable.clone())
+                        }
+                        target => target.clone(),
+                    },
+                )
+                .collect(),
+            s.renderer.icon_size(),
+        )
+    }) else {
+        return;
+    };
     let _ = view();
-    match session.request(targets) {
+    match session.request(targets, size) {
         Ok(true) => {
             let previous = state(|s| {
                 std::mem::replace(&mut s.view.icons, vec![None; s.view.rows.len()].into())
@@ -467,7 +474,16 @@ fn refresh() {
     match result {
         Ok(mut scan) => {
             // Preserve only unreadable entries after native discovery returns. No full index clone.
-            state(|s| scan.preserve_unreadable(s.controller.catalog()));
+            state(|s| {
+                scan.preserve_unreadable(s.controller.catalog());
+                if system_sources && unavailable != 0 {
+                    discovery::preserve_unresolved_folders(
+                        &mut scan,
+                        s.controller.catalog(),
+                        &roots,
+                    );
+                }
+            });
             let failed = scan.failure_count() + unavailable;
             let catalog = Catalog::new(scan.entries);
             let count = catalog.entries().len();
@@ -1130,7 +1146,12 @@ pub fn run(options: Options) -> io::Result<()> {
         let mut cached = cache::load(&path).ok();
         let scan = discovery::discover_sources(&roots, cached.as_ref(), system_sources);
         let (catalog, failed, source) = match scan {
-            Ok(scan) => {
+            Ok(mut scan) => {
+                if system_sources && unavailable != 0 {
+                    if let Some(previous) = cached.as_ref() {
+                        discovery::preserve_unresolved_folders(&mut scan, previous, &roots);
+                    }
+                }
                 let failed = scan.failure_count() + unavailable;
                 (Catalog::new(scan.entries), failed, None)
             }

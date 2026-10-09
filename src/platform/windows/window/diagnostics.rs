@@ -175,10 +175,45 @@ pub(super) unsafe fn message(hwnd: Hwnd, msg: u32, wp: usize) -> Option<isize> {
                         }) as isize
                     }
                 }
-                _ => 1,
+                crate::model::LaunchTarget::AppPath(app) => {
+                    if wp == 0 {
+                        3
+                    } else {
+                        use std::os::windows::ffi::OsStrExt;
+                        app.executable
+                            .as_os_str()
+                            .encode_wide()
+                            .fold(2166136261u32, |h, unit| {
+                                (h ^ u32::from(unit)).wrapping_mul(16777619)
+                            }) as isize
+                    }
+                }
+                crate::model::LaunchTarget::ShellPath(path) => {
+                    if wp == 0 {
+                        1
+                    } else {
+                        use std::os::windows::ffi::OsStrExt;
+                        path.as_os_str()
+                            .encode_wide()
+                            .fold(2166136261u32, |h, unit| {
+                                (h ^ u32::from(unit)).wrapping_mul(16777619)
+                            }) as isize
+                    }
+                }
             }
         })
         .unwrap_or(0),
+        0x8010 => {
+            let selected = state(|s| s.controller.selected_index()).flatten()?;
+            let snapshot = view()?;
+            let icon = snapshot.icons.get(selected)?.as_ref()?.clone();
+            let (width, height) = icon.dimensions()?;
+            if wp == 0 {
+                width as isize
+            } else {
+                height as isize
+            }
+        }
         _ => return None,
     })
 }

@@ -1,5 +1,15 @@
 # 首个可用版本
 
+2026-10-09 启动生命周期：受控无 breakaway Job 复现终端连带结束应用；桌面普通启动仍用原 Shell，处于 Job／附着控制台时改用同用户、同会话、完整性级别不高于调用者且处于 Job 外的桌面 Shell 作为短命 helper 父进程。helper 保留当前 UTF-16 环境、App Paths Path、原 .lnk 参数／工作目录，自身核验 Job 后调用 Shell／AUMID API；没有修改终端 Job 或常驻 worker。100 单元＋7 集成及构建检查通过，release 24／debug 8 生命周期例和各两错误例通过；AUMID 不存在包的错误桥接通过，真实 Store 成功激活未验收。证据及权限／设备映射、短时 helper 内存边界见 [LAUNCH_LIFETIME_RESULTS.md](LAUNCH_LIFETIME_RESULTS.md)。
+
+2026-10-09 应用来源补齐：默认目录改为用户／公共 StartMenu 根目录递归，覆盖已有 Programs 子树和根本层入口；通过 Known Folder 解析用户／公共 Startup 并排除对应子树，仍保留 16 层递归、重解析点与符号链接边界。目录接受 `.exe`、ClickOnce `.appref-ms` 和目标为这两类入口的 `.lnk`，打开仍执行原入口。默认来源另读 HKCU／HKLM App Paths 的 32／64 位视图，严格处理字符串、配对引号、`REG_EXPAND_SZ`、已有绝对 `.exe` 路径与可选 `Path`；不同键名、可执行文件或环境映射保守分别保留，不将其与带参数的快捷方式合并。显式 `--source` 继续替代全部默认来源，包括 App Paths／AppsFolder；不加入 PATH 或游戏协议扫描。
+
+普通快捷方式显示名优先 Shell 本地化名称，原文件 stem 和目标 EXE stem 作为最多两个附加名称；仅在索引时生成名称、全拼、首字母并去重，总键数最多 9。每个附加 UTF-8 键最多 512 字节，附加字符串和键向量槽位的 owned 容量最多 2 KiB；整组超限跳过，不截断 Unicode 字符，也不保留原始别名或计数常驻字段。目标池仍限 512 项／128 KiB，池满后在形成最终索引时重读缺失的快捷方式目标，避免仅因池限额丢失 EXE 名别名。搜索按键路径只消费预计算键。
+
+App Paths `Path` 仅在用户执行打开时传入一次性、无窗的本程序 helper 的私有环境，再由 helper 通过 Shell 执行保存的精确绝对路径；不修改主进程 PATH，没有常驻 helper 或新增后台 worker。缓存文件继续使用 `apps-v1.bin`，写入 v3，可读取 v1／v2／v3；v3 带启动目标 tag、可选注册 `Path` 和显示名基础键数量，以有界读取附加键。当前生成的 v3 可保持名称、目标和别名往返；加载边界不保证外部构造的非规范键组还能再次保存。91 个单元与 7 个集成测试及构建检查通过，三轮默认／两轮自定义来源探针完整通过。混合分隔符会在本机 Shell 退出阶段触发原生异常，冻结旧版亦复现；文件系统 Shell 边界统一 UTF-16 分隔符后，两类路径各三轮正常退出。保存路径不变，不跳过 COM 清理。完整进程和规模测量见下方报告。完整结论与未验证范围见 [DISCOVERY_SOURCES_RESULTS.md](DISCOVERY_SOURCES_RESULTS.md)。
+
+2026-10-09 图标尺寸：修复本机125%下40px Shell图标缩放到25px的多余转换；图标请求传物理尺寸，Store用IExtractIconW、文件资源用SHDefExtractIconW，并在DPI变化时替换既有缓存。两项100%–400%模拟尺寸、22打包入口及500受控普通入口通过；完整进程与响应边界见 [DPI_ICONS_RESULTS.md](DPI_ICONS_RESULTS.md)。同轮只读核对Flow Launcher的应用来源，后续App Paths/StartMenu根/ClickOnce/名称别名的优先级见 [FLOW_DISCOVERY_AUDIT.md](FLOW_DISCOVERY_AUDIT.md)，该调查阶段扫描代码尚未扩展；同日后续实施见上方来源补齐记录。
+
 2026-10-09 商店应用发现：默认来源新增通过 AppsFolder 枚举当前用户已安装的打包应用，使用 Windows 本地化名称建立名称/拼音索引，并通过 AUMID 激活；仅启动/F5 刷新，不引入依赖或后台轮询。显式 `--source` 仍只扫描指定目录，不纳入打包应用；后续图标修复通过 AppsFolder 在原 STA 线程提取可见入口图标，与普通应用共用 48 条缓存；见 [STORE_ICONS_RESULTS.md](STORE_ICONS_RESULTS.md)。本机 Windows 10 Pro 22H2（19045）x64 的三轮原生窗口探针均找到 ChatGPT 和 Microsoft Store，共 22 个打包应用、330 个索引入口；这项功能验证不代表完整 Windows 10、低配实机或 32 位/ARM64 兼容性。实现与验证边界见 [STORE_APPS_RESULTS.md](STORE_APPS_RESULTS.md)。下文 2026-10-03 的 Store/UWP 未完成说明保留为当时的历史范围。
 
 2026-10-05 审查修复：修正图标线程停止的丢失唤醒、离线已知来源回补和 Unicode 路径误合并；第二实例通过就绪事件等待初始化完成，并转交前台权限。安装器支持正常 UNC 路径的自启动归属清理，包装验证失败时回收自身测试进程。修复、受控回归和验证边界见 [REVIEW_FIXES_RESULTS.md](REVIEW_FIXES_RESULTS.md)。Windows 10 和低配实机测试按用户要求暂缓。

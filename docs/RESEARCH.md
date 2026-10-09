@@ -1,5 +1,21 @@
 # 前期证据与适用范围
 
+2026-10-09：终端强制关闭会通过继承的 Windows Job 连带结束应用，受控原版／修复版验证与 Windows SDK 父进程属性、环境及安全边界见 [LAUNCH_LIFETIME_RESULTS.md](LAUNCH_LIFETIME_RESULTS.md)。选择仅在需要时创建独立 helper，保留普通桌面启动的原路径；没有靠隐藏控制台或修改终端 Job 处理生命周期。
+
+2026-10-09：Flow Launcher Program 插件的默认与可选来源核对见 [FLOW_DISCOVERY_AUDIT.md](FLOW_DISCOVERY_AUDIT.md)，固定官方提交；该调查阶段未扩展扫描，用户随后授权的实施范围如下。
+
+## 2026-10-09：来源补齐与有界名称别名
+
+用户随后批准实施 [FLOW_DISCOVERY_AUDIT.md](FLOW_DISCOVERY_AUDIT.md) 的前三项建议。PicoRun 独立补充默认 StartMenu 根目录递归、HKCU／HKLM 双注册表视图的 App Paths、ClickOnce `.appref-ms`（包括指向该入口的 `.lnk`），并用 Shell 本地化名、原快捷方式 stem、目标 EXE stem 建立有界搜索名称。没有复制 Flow 的扫描或排名代码，不声称应用清单或排序与 Flow 等价；打包应用仍由原 AppsFolder／AUMID 路径发现，尚未按 AUMID 做两者的完整差分。
+
+开始菜单仍由 Known Folder 处理重定向，Startup 也由系统已知目录定位后排除，不依赖英文目录名。App Paths 原生读取分别覆盖 HKCU／HKLM 的 32／64 位视图；仅接受合法、现存、绝对 `.exe` 映射，按注册值类型展开 `REG_EXPAND_SZ`，保留可选 `Path`。只合并键名、目标和环境都相同的注册映射，不因 EXE 相同就合并不同环境或原快捷方式；App Paths `Path` 的启动处理使用一次性无窗 PicoRun helper 的私有环境和 Shell 精确路径，主进程 PATH 保持原样。helper 只在用户请求打开相应注册项时运行，不是索引脚本或常驻服务。
+
+别名仅在索引时生成归一化名、全拼及首字母，最多两个附加名称／总计九个键，附加键每条不超过 512 UTF-8 字节，附加 owned 容量不超过 2 KiB；超限整组跳过而不截断字符。规范键组可恢复名称数量，因此没有原始别名或计数常驻字段；添加别名及保存时重算布局的开销应纳入索引／缓存计量，搜索不重新转换候选拼音。共享目标池保持 512 项／128 KiB，上限以外的 `.lnk` 目标在最后索引阶段按需重读。
+
+索引仍为启动／F5 更新，无 watcher、轮询或新依赖。`--source` 保持替代默认来源的既有语义，也排除默认 App Paths 和打包来源；本轮未加入 PATH 目录或游戏协议扫描。`apps-v1.bin` 文件名不变，当前写 v3 并读取 v1／v2／v3；由当前保存器生成的 v3 目标与别名可往返，外部构造的非规范键组不承诺再次保存成功。
+
+单元测试已覆盖注册映射、别名、旧缓存迁移和有界输入；这些不代替真实应用启动、窗口响应或完整进程内存验收。混合路径曾导致本机 `windows.storage.dll` 退出异常，冻结旧版亦复现。仅将文件系统 Shell 传参统一为本机分隔符后，混合／标准路径各三轮正常退出；原默认／自定义来源探针也完整通过。保存身份和 COM 收尾仍保留，原失败证据不计为通过。受控验证、500／2000／10000 项样本、完整进程私有提交／工作集／峰值和系统边界见 [DISCOVERY_SOURCES_RESULTS.md](DISCOVERY_SOURCES_RESULTS.md)，不将本轮实现等同于 Windows 10、低配实机或 32 位／ARM64 的完整验证。
+
 ## 2026-10-04：其他启动器的应用去重
 
 实施前只读核对下列固定提交的源代码和现有测试，未构建、运行其他启动器或进行同机性能比较。Flow 为 dev，其他为各项目默认分支快照，不将源码快照等同于所有发布版本。这里只借鉴原则，不复制外部实现；随后用户批准的 PicoRun 实现与实测见 [DEDUP_RESULTS.md](DEDUP_RESULTS.md)。
