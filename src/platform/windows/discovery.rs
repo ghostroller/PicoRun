@@ -1,6 +1,7 @@
 use super::{ffi::*, wide};
 use crate::i18n::Text;
 mod dedup;
+mod packaged;
 mod path_key;
 use crate::{
     catalog::Catalog,
@@ -199,26 +200,31 @@ impl ShortcutReader {
     }
 }
 fn sort_entries(entries: &mut [AppEntry]) {
-    fn path(entry: &AppEntry) -> Option<&Path> {
-        match &entry.target {
-            LaunchTarget::ShellPath(path) => Some(path),
-            LaunchTarget::AppUserModelId(_) => None,
-        }
-    }
     // The first precomputed search key is the normalized display name. No sort-time strings.
     entries.sort_unstable_by(|a, b| {
         a.keys[0]
             .cmp(&b.keys[0])
-            .then_with(|| path(a).cmp(&path(b)))
+            .then_with(|| match (&a.target, &b.target) {
+                (LaunchTarget::ShellPath(a), LaunchTarget::ShellPath(b)) => a.cmp(b),
+                (LaunchTarget::AppUserModelId(a), LaunchTarget::AppUserModelId(b)) => a.cmp(b),
+                (LaunchTarget::ShellPath(_), LaunchTarget::AppUserModelId(_)) => {
+                    std::cmp::Ordering::Less
+                }
+                _ => std::cmp::Ordering::Greater,
+            })
     });
 }
 pub struct Scan {
     pub entries: Vec<AppEntry>,
     pub failed: Vec<PathBuf>,
+    pub packaged_failed: bool,
 }
 impl Scan {
+    pub fn failure_count(&self) -> usize {
+        self.failed.len() + usize::from(self.packaged_failed)
+    }
     pub fn preserve_unreadable(&mut self, previous: &Catalog) {
-        if self.failed.is_empty() {
+        if self.failed.is_empty() && !self.packaged_failed {
             return;
         }
         let mut seen: HashSet<_> = self
@@ -241,12 +247,37 @@ impl Scan {
                 }
             }
         }
+        if self.packaged_failed {
+            let mut ids: HashSet<_> = self
+                .entries
+                .iter()
+                .filter_map(|entry| match &entry.target {
+                    LaunchTarget::AppUserModelId(id) => Some(id.clone()),
+                    _ => None,
+                })
+                .collect();
+            for entry in previous.entries() {
+                if let LaunchTarget::AppUserModelId(id) = &entry.target {
+                    if ids.insert(id.clone()) {
+                        self.entries.push(entry.clone());
+                    }
+                }
+            }
+        }
         // Failed sources have unknown current launch metadata: retain them conservatively.
         sort_entries(&mut self.entries);
     }
 }
 pub fn discover(roots: &[PathBuf], previous: Option<&Catalog>) -> io::Result<Scan> {
-    if roots.is_empty() {
+    discover_sources(roots, previous, false)
+}
+/// Only default sources include the Shell's packaged apps. Explicit --source remains isolated.
+pub fn discover_sources(
+    roots: &[PathBuf],
+    previous: Option<&Catalog>,
+    include_packaged: bool,
+) -> io::Result<Scan> {
+    if roots.is_empty() && !include_packaged {
         return Err(io::Error::other(Text::RootsMissing));
     }
     let mut reader = ShortcutReader::new()?;
@@ -336,21 +367,44 @@ pub fn discover(roots: &[PathBuf], previous: Option<&Catalog>) -> io::Result<Sca
     drop(reader);
     // Release all grouping keys before allocating pinyin aliases for the survivors.
     let mut entries = deduper.into_entries();
+    let mut packaged_failed = false;
+    if include_packaged {
+        match packaged::discover() {
+            Ok(apps) => entries.extend(apps),
+            Err(_) => packaged_failed = true,
+        }
+    }
     sort_entries(&mut entries);
-    let mut scan = Scan { entries, failed };
+    let mut scan = Scan {
+        entries,
+        failed,
+        packaged_failed,
+    };
     if let Some(previous) = previous {
         scan.preserve_unreadable(previous);
     }
-    let Scan { entries, failed } = scan;
-    if !roots.is_empty() && roots.iter().all(|root| failed.contains(root)) && entries.is_empty() {
+    let Scan {
+        entries,
+        failed,
+        packaged_failed,
+    } = scan;
+    if roots.iter().all(|root| failed.contains(root))
+        && entries.is_empty()
+        && (!include_packaged || packaged_failed)
+    {
         return Err(io::Error::other(Text::RootsUnreadable));
     }
-    Ok(Scan { entries, failed })
+    Ok(Scan {
+        entries,
+        failed,
+        packaged_failed,
+    })
 }
 
 pub fn launch(hwnd: Hwnd, target: &LaunchTarget) -> io::Result<()> {
-    let LaunchTarget::ShellPath(path) = target else {
-        return Err(io::Error::other(Text::UwpUnsupported));
+    let path = match target {
+        LaunchTarget::ShellPath(path) => path,
+        LaunchTarget::AppUserModelId(id) => return packaged::launch(id),
     };
     if !path.is_file() {
         return Err(io::Error::new(io::ErrorKind::NotFound, Text::EntryMissing));
@@ -388,6 +442,59 @@ pub fn launch(hwnd: Hwnd, target: &LaunchTarget) -> io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn packaged_failure_preserves_only_previous_packaged_entries_without_duplicates() {
+        let packaged =
+            |name: &str, id: &str| AppEntry::new(name, LaunchTarget::AppUserModelId(id.into()));
+        let previous = Catalog::new(vec![
+            packaged("旧名称", "Sample.App_1234567890abc!App"),
+            packaged("保留", "Other.App_1234567890abc!App"),
+            AppEntry::new(
+                "删除",
+                LaunchTarget::ShellPath("readable/deleted.lnk".into()),
+            ),
+        ]);
+        let mut scan = Scan {
+            entries: vec![packaged("新名称", "Sample.App_1234567890abc!App")],
+            failed: Vec::new(),
+            packaged_failed: true,
+        };
+        scan.preserve_unreadable(&previous);
+        assert_eq!(scan.failure_count(), 1);
+        assert_eq!(scan.entries.len(), 2);
+        assert!(scan.entries.iter().any(|entry| entry.name == "新名称"));
+        assert!(scan.entries.iter().any(|entry| entry.name == "保留"));
+        assert!(!scan.entries.iter().any(|entry| entry.name == "旧名称"));
+
+        let mut successful = Scan {
+            entries: Vec::new(),
+            failed: vec!["readable".into()],
+            packaged_failed: false,
+        };
+        successful.preserve_unreadable(&previous);
+        assert_eq!(successful.entries.len(), 1);
+        assert_eq!(successful.entries[0].name, "删除");
+    }
+
+    #[test]
+    fn same_name_packaged_entries_have_stable_id_order() {
+        let mut entries = vec![
+            AppEntry::new("同名", LaunchTarget::AppUserModelId("B!App".into())),
+            AppEntry::new("同名", LaunchTarget::AppUserModelId("A!App".into())),
+            AppEntry::new("同名", LaunchTarget::ShellPath("same.lnk".into())),
+        ];
+        sort_entries(&mut entries);
+        assert!(matches!(entries[0].target, LaunchTarget::ShellPath(_)));
+        assert_eq!(
+            entries[1].target,
+            LaunchTarget::AppUserModelId("A!App".into())
+        );
+        assert_eq!(
+            entries[2].target,
+            LaunchTarget::AppUserModelId("B!App".into())
+        );
+    }
 
     #[test]
     fn source_lookup_keeps_offline_location_for_real_scan_recovery() {
@@ -464,6 +571,7 @@ mod tests {
         let mut scan = Scan {
             entries: vec![entry("c:\\apps\\ascii.exe"), entry("c:\\apps\\İ.exe")],
             failed: vec![PathBuf::from("C:\\APPS")],
+            packaged_failed: false,
         };
         let previous = Catalog::new(vec![
             entry("C:\\Apps\\ASCII.exe"),

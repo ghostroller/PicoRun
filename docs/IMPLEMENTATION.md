@@ -1,5 +1,7 @@
 # 首个可用版本
 
+2026-10-09 商店应用发现：默认来源新增通过 AppsFolder 枚举当前用户已安装的打包应用，使用 Windows 本地化名称建立名称/拼音索引，并通过 AUMID 激活；仅启动/F5 刷新，不引入依赖或后台轮询。显式 `--source` 仍只扫描指定目录，不纳入打包应用；图标开启时这类入口暂用通用图标。本机 Windows 10 Pro 22H2（19045）x64 的三轮原生窗口探针均找到 ChatGPT 和 Microsoft Store，共 22 个打包应用、330 个索引入口；这项功能验证不代表完整 Windows 10、低配实机或 32 位/ARM64 兼容性。实现与验证边界见 [STORE_APPS_RESULTS.md](STORE_APPS_RESULTS.md)。下文 2026-10-03 的 Store/UWP 未完成说明保留为当时的历史范围。
+
 2026-10-05 审查修复：修正图标线程停止的丢失唤醒、离线已知来源回补和 Unicode 路径误合并；第二实例通过就绪事件等待初始化完成，并转交前台权限。安装器支持正常 UNC 路径的自启动归属清理，包装验证失败时回收自身测试进程。修复、受控回归和验证边界见 [REVIEW_FIXES_RESULTS.md](REVIEW_FIXES_RESULTS.md)。Windows 10 和低配实机测试按用户要求暂缓。
 
 2026-10-05 语言补充：内置简体中文与英文，托盘右键即时切换；`language.txt` 独立保存选择。只翻译产品界面，不改变应用名称、查询、拼音索引、文本/结果选择、窗口几何或输入模式。状态保留结构化通知与原始错误，切换时重新翻译；UTF-16 界面文本只在语言/状态变化时生成，搜索时不读取设置。见 [I18N_RESULTS.md](I18N_RESULTS.md)。
@@ -22,7 +24,7 @@
 
 2026-10-04 更新：新增默认关闭的“登录时启动 PicoRun”托盘开关，只注册当前用户的 Run 值，登录命令隐藏到托盘，取消勾选删除注册。注册表、真实菜单和跨进程保存已通过；实际注销/重启登录尚未测试，见 [STARTUP_RESULTS.md](STARTUP_RESULTS.md)。
 
-2026-10-03 更新：首个原生版本、托盘、亮/暗主题、原生 IME 按键交接、持久化的英文输入开关和应用图标开关已实现；下面保留为范围与验收规格。图标默认关闭，正式开关与性能对照见 [ICON_SWITCH_RESULTS.md](ICON_SWITCH_RESULTS.md)，英文验证见 [ENGLISH_INPUT_RESULTS.md](ENGLISH_INPUT_RESULTS.md)，IME 与 Flow Launcher 参考见 [IME_RESULTS.md](IME_RESULTS.md)，此前托盘/主题见 [TRAY_THEME_RESULTS.md](TRAY_THEME_RESULTS.md)。两个开关使用现有托盘菜单；新进程直接英文查询能避开本机小狼毫组合输入的明显增量，实际中文 IME 加载后的常驻与 Shell 峰值仍需优化。Store/UWP 枚举、其他输入法、Windows 10/32 位/低内存实机仍未完成。
+2026-10-03 更新：首个原生版本、托盘、亮/暗主题、原生 IME 按键交接、持久化的英文输入开关和应用图标开关已实现；下面保留为范围与验收规格。图标默认关闭，正式开关与性能对照见 [ICON_SWITCH_RESULTS.md](ICON_SWITCH_RESULTS.md)，英文验证见 [ENGLISH_INPUT_RESULTS.md](ENGLISH_INPUT_RESULTS.md)，IME 与 Flow Launcher 参考见 [IME_RESULTS.md](IME_RESULTS.md)，此前托盘/主题见 [TRAY_THEME_RESULTS.md](TRAY_THEME_RESULTS.md)。两个开关使用现有托盘菜单；新进程直接英文查询能避开本机小狼毫组合输入的明显增量，实际中文 IME 加载后的常驻与 Shell 峰值仍需优化。当时 Store/UWP 枚举、其他输入法、Windows 10/32 位/低内存实机仍未完成；Store/UWP 的后续实现见上方 2026-10-09 记录。
 
 已确定独立重写。目标是内存极度紧张的 Windows 10 机器，不要重新讨论 fork 或换到 Web UI；直接从已有框架实现。
 

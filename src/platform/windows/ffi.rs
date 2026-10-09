@@ -350,6 +350,13 @@ unsafe extern "system" {
     pub fn CloseHandle(handle: Handle) -> i32;
     pub fn MoveFileExW(source: *const u16, destination: *const u16, flags: u32) -> i32;
     pub fn AttachConsole(process: u32) -> i32;
+    pub fn GetPackagesByPackageFamily(
+        family: *const u16,
+        count: *mut u32,
+        names: *mut *mut u16,
+        buffer_len: *mut u32,
+        buffer: *mut u16,
+    ) -> i32;
 }
 #[link(name = "shell32")]
 unsafe extern "system" {
@@ -360,6 +367,12 @@ unsafe extern "system" {
         flags: u32,
         token: Handle,
         path: *mut *mut u16,
+    ) -> i32;
+    pub fn SHCreateItemFromParsingName(
+        name: *const u16,
+        bind_ctx: *mut c_void,
+        iid: *const Guid,
+        object: *mut *mut c_void,
     ) -> i32;
     pub fn ShellExecuteW(
         hwnd: Hwnd,
@@ -376,6 +389,7 @@ unsafe extern "system" {
     pub fn CoInitializeEx(reserved: *mut c_void, flags: u32) -> i32;
     pub fn CoUninitialize();
     pub fn CoTaskMemFree(memory: *mut c_void);
+    pub fn PropVariantClear(value: *mut c_void) -> i32;
     pub fn CoCreateInstance(
         class: *const Guid,
         outer: *mut c_void,

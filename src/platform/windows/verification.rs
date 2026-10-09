@@ -10,6 +10,7 @@ mod input_session_probe;
 mod instance_probe;
 mod language_probe;
 mod mouse_probe;
+mod packaged_probe;
 mod startup_probe;
 use super::{discovery, ffi::*, tray, wide};
 use crate::cache;
@@ -192,8 +193,10 @@ fn wait_window(child: &mut Running) -> io::Result<(Hwnd, Hwnd)> {
                 return Ok((hwnd, edit));
             }
         }
-        if child.0.try_wait()?.is_some() {
-            return Err(io::Error::other("launcher exited before creating window"));
+        if let Some(status) = child.0.try_wait()? {
+            return Err(io::Error::other(format!(
+                "launcher exited before creating window: {status}"
+            )));
         }
         if start.elapsed() > Duration::from_secs(15) {
             return Err(io::Error::other(
@@ -537,6 +540,27 @@ fn open_tray_menu(hwnd: Hwnd, pid: u32) -> io::Result<Hwnd> {
 }
 pub fn run() -> io::Result<()> {
     let args: Vec<_> = std::env::args_os().skip(1).collect();
+    if args.first().is_some_and(|a| a == "--packaged-host") {
+        let data = PathBuf::from(
+            args.get(1)
+                .ok_or_else(|| io::Error::other("missing host data"))?,
+        );
+        let result = super::window::run(super::window::Options {
+            data_dir: Some(data.clone()),
+            hotkey: "Ctrl+Alt+Shift+F9".into(),
+            hidden: true,
+            icons: Some(false),
+            measure_icons: true,
+            ..Default::default()
+        });
+        if let Err(error) = &result {
+            fs::write(data.join("host-error.txt"), error.to_string())?;
+        }
+        return result;
+    }
+    if args.first().is_some_and(|a| a == "--packaged") {
+        return packaged_probe::run(args.iter().any(|a| a == "--reference"));
+    }
     if args.first().is_some_and(|a| a == "--instance") {
         return instance_probe::run();
     }

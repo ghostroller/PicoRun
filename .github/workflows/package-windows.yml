@@ -121,14 +121,19 @@ jobs:
             }
           }
           $notesPath = Join-Path $env:RUNNER_TEMP 'picorun-release-notes.md'
-          @(
-            "Windows x64 installer and ZIP for PicoRun $env:RELEASE_TAG.",
-            '',
-            '- Install with the setup executable, or extract the ZIP and run picorun.exe.',
-            '- SHA256SUMS.txt contains checksums for both packages.',
-            '- build.json records the build toolchain and tagged source commit.',
-            '',
-            'Targets Windows 10 or newer; application validation so far covers Windows 11 x64.'
-          ) | Set-Content -LiteralPath $notesPath -Encoding utf8
+          $versionNotesPath = "docs/releases/$env:RELEASE_TAG.md"
+          if (Test-Path -LiteralPath $versionNotesPath -PathType Leaf) {
+            Copy-Item -LiteralPath $versionNotesPath -Destination $notesPath
+          } else {
+            @(
+              "Windows x64 installer and ZIP for PicoRun $env:RELEASE_TAG.",
+              '',
+              '- Install with the setup executable, or extract the ZIP and run picorun.exe.',
+              '- SHA256SUMS.txt contains checksums for both packages.',
+              '- build.json records the build toolchain and tagged source commit.',
+              '',
+              'Targets Windows 10 or newer; application validation so far covers Windows 11 x64.'
+            ) | Set-Content -LiteralPath $notesPath -Encoding utf8
+          }
           & gh release create $env:RELEASE_TAG @releaseFiles --repo $env:GITHUB_REPOSITORY --verify-tag --title "PicoRun $env:RELEASE_TAG" --notes-file $notesPath
           if ($LASTEXITCODE -ne 0) { throw 'GitHub Release publication failed.' }

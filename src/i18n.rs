@@ -96,7 +96,6 @@ texts! {
     LinkRead => ("无法读取 Shell Link", "Could not read Shell Link"),
     RootsMissing => ("无法确定应用目录；保留原有索引，可按 F5 重试", "Could not find app folders; previous index retained. Press F5 to retry"),
     RootsUnreadable => ("所有应用目录均无法读取；保留原有索引", "All app folders are unreadable; previous index retained"),
-    UwpUnsupported => ("此版本尚未支持 Store/UWP 应用", "Store/UWP apps are not supported in this version"),
     EntryMissing => ("入口已失效，请按 F5 刷新索引", "This entry is no longer available. Press F5 to refresh"),
     StartupInvalid => ("自启动注册内容无效", "Invalid sign-in startup registry data"),
     StartupExtra => ("自启动注册内容包含额外数据", "Sign-in startup registry data contains extra data"),
@@ -121,6 +120,8 @@ impl std::error::Error for Text {}
 #[derive(Debug)]
 pub enum Failure {
     Launch(u32),
+    Packaged(i32),
+    PackagedDiscovery(i32),
     Hotkey { hotkey: String, code: u32 },
 }
 impl fmt::Display for Failure {
@@ -128,6 +129,10 @@ impl fmt::Display for Failure {
         match (self, current()) {
             (Self::Launch(code), Language::Chinese) => write!(f, "打开失败（Windows 错误 {code}），可按 F5 刷新"),
             (Self::Launch(code), Language::English) => write!(f, "Could not open app (Windows error {code}); press F5 to refresh"),
+            (Self::Packaged(code), Language::Chinese) => write!(f, "打开商店应用失败（HRESULT 0x{code:08X}），可按 F5 刷新"),
+            (Self::Packaged(code), Language::English) => write!(f, "Could not open packaged app (HRESULT 0x{code:08X}); press F5 to refresh"),
+            (Self::PackagedDiscovery(code), Language::Chinese) => write!(f, "读取商店应用失败（HRESULT 0x{code:08X}）"),
+            (Self::PackagedDiscovery(code), Language::English) => write!(f, "Could not read packaged apps (HRESULT 0x{code:08X})"),
             (Self::Hotkey { hotkey, code }, Language::Chinese) => write!(f, "热键 {hotkey} 注册失败（可能已被占用）。请用 --hotkey Ctrl+Alt+P 等组合重启。Windows 错误 {code}"),
             (Self::Hotkey { hotkey, code }, Language::English) => write!(f, "Could not register hotkey {hotkey} (it may be in use). Restart with --hotkey Ctrl+Alt+P or another combination. Windows error {code}"),
         }
@@ -205,11 +210,11 @@ impl fmt::Display for Notice {
                         })?;
                     }
                     match current() {
-                        Language::Chinese => write!(f, " · {failed} 个目录读取失败")?,
+                        Language::Chinese => write!(f, " · {failed} 个来源读取失败")?,
                         Language::English => write!(
                             f,
                             " · {failed} unreadable {}",
-                            if *failed == 1 { "folder" } else { "folders" }
+                            if *failed == 1 { "source" } else { "sources" }
                         )?,
                     }
                 }
@@ -247,9 +252,9 @@ mod tests {
         };
         assert_eq!(
             status.to_string(),
-            "1 app · Refreshed · 1 unreadable folder"
+            "1 app · Refreshed · 1 unreadable source"
         );
         set(Language::Chinese);
-        assert_eq!(status.to_string(), "1 个应用 · 刷新完成 · 1 个目录读取失败");
+        assert_eq!(status.to_string(), "1 个应用 · 刷新完成 · 1 个来源读取失败");
     }
 }

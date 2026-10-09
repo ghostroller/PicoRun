@@ -174,7 +174,7 @@ fn request_icons() {
             .map(|hit| {
                 match &s.controller.catalog().entries()[hit.entry_index].target {
                     crate::model::LaunchTarget::ShellPath(path) => path.clone(),
-                    // Preserve row alignment for unsupported Store entries, without file access.
+                    // Packaged apps use the existing generic icon; no package image cache.
                     _ => PathBuf::new(),
                 }
             })
@@ -465,17 +465,18 @@ fn refresh() {
     } else {
         0
     };
-    let result = discovery::discover(&roots, None);
+    let result = discovery::discover_sources(&roots, None, system_sources);
     match result {
         Ok(mut scan) => {
             // Preserve only unreadable entries after native discovery returns. No full index clone.
             state(|s| scan.preserve_unreadable(s.controller.catalog()));
+            let failed = scan.failure_count() + unavailable;
             let catalog = Catalog::new(scan.entries);
             let count = catalog.entries().len();
             let saved = cache::save(&path, &catalog);
             let status = Notice::Catalog {
                 count,
-                failed: scan.failed.len() + unavailable,
+                failed,
                 refreshed: true,
                 cache_failed: saved.is_err(),
                 source: None,
@@ -1129,13 +1130,12 @@ pub fn run(options: Options) -> io::Result<()> {
             (options.sources, 0)
         };
         let mut cached = cache::load(&path).ok();
-        let scan = discovery::discover(&roots, cached.as_ref());
+        let scan = discovery::discover_sources(&roots, cached.as_ref(), system_sources);
         let (catalog, failed, source) = match scan {
-            Ok(scan) => (
-                Catalog::new(scan.entries),
-                scan.failed.len() + unavailable,
-                None,
-            ),
+            Ok(scan) => {
+                let failed = scan.failure_count() + unavailable;
+                (Catalog::new(scan.entries), failed, None)
+            }
             Err(error) => (cached.take().unwrap_or_default(), 0, Some(error)),
         };
         drop(cached); // Release the startup fallback after successful discovery.

@@ -161,6 +161,24 @@ pub(super) unsafe fn message(hwnd: Hwnd, msg: u32, wp: usize) -> Option<isize> {
                 _ => 0,
             }
         }
+        0x800f => state(|s| {
+            let Some(target) = s.controller.selected_target() else {
+                return 0;
+            };
+            match target {
+                crate::model::LaunchTarget::AppUserModelId(id) => {
+                    if wp == 0 {
+                        2
+                    } else {
+                        id.encode_utf16().fold(2166136261u32, |h, unit| {
+                            (h ^ u32::from(unit)).wrapping_mul(16777619)
+                        }) as isize
+                    }
+                }
+                _ => 1,
+            }
+        })
+        .unwrap_or(0),
         _ => return None,
     })
 }

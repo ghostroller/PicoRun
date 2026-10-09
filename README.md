@@ -15,7 +15,7 @@ Press **Alt+Space**, type an app name, and press **Enter** to open it. Search us
 
 Download the installer or ZIP from [GitHub Releases](https://github.com/ghostroller/PicoRun/releases/latest). Each release lists the versioned Windows x64 packages, SHA-256 checksums, and build metadata. You can also [build from source](#build-from-source).
 
-Packages target **Windows x64**, with Windows 10 as the minimum target. Testing so far covers Windows 11 x64; Windows 10, 32-bit Windows, and ARM64 have not been verified.
+Packages target **Windows x64**, with Windows 10 as the minimum target. Prior testing covers Windows 11 x64; packaged app discovery and search have also been checked on Windows 10 22H2 x64. Full Windows 10 compatibility, low-end hardware, 32-bit Windows, and ARM64 remain unverified.
 
 | Package | How to use it |
 | --- | --- |
@@ -63,9 +63,11 @@ UI language and English input are independent settings. Changing the interface l
 
 ## Finding apps and troubleshooting
 
-PicoRun looks for apps in your user and shared **Start menu Programs** folders and **Desktop** folders. It refreshes this list at startup or when you press **F5**.
+By default, PicoRun looks for apps in your user and shared **Start menu Programs** folders and **Desktop** folders, plus installed packaged apps for the current user through Windows **AppsFolder**. It refreshes this list at startup or when you press **F5**; there is no background polling.
 
-- **An app is missing:** add a shortcut pointing to its `.exe` to the Start menu or Desktop, then press F5. Store/UWP app enumeration is not supported yet; documents, folders, and web shortcuts are excluded.
+- **An app is missing:** press F5 after installing it. For a desktop app without a discoverable shortcut, add a shortcut pointing to its `.exe` to the Start menu or Desktop. Documents, folders, and web shortcuts are excluded.
+- **A Store app has a different name:** packaged apps use the localized name supplied by Windows. Try that name or its pinyin; opening uses the app's Windows activation ID (AUMID). With app icons enabled, these entries currently display a generic icon.
+- **Using `--source`:** custom folders replace all default sources, including packaged apps. Omit this option to include installed Store apps.
 - **An app was installed or removed:** press F5 or restart PicoRun to update the list.
 - **Similar names appear more than once:** shortcuts with different launch settings may be kept separately. PicoRun preserves their arguments and working directories when opening them.
 - **Alt+Space is already in use:** start PicoRun with another hotkey, such as `picorun.exe --hotkey Ctrl+Alt+P`. Quit any existing instance before changing the startup command.
