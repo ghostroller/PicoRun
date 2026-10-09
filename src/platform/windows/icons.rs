@@ -1,11 +1,12 @@
 //! Visible-result icons: a lazy STA worker, latest request, bounded caches, blocking idle.
 use super::{ffi::*, wide};
+use crate::model::LaunchTarget;
+mod packaged;
 mod resource_cache;
 pub use resource_cache::Stats;
 use std::{
     cell::{Cell, RefCell},
     io,
-    path::PathBuf,
     ptr::null_mut,
     sync::{
         atomic::{AtomicBool, Ordering},
@@ -56,7 +57,7 @@ fn generic() -> Option<Arc<Icon>> {
     let icon = unsafe { CopyIcon(LoadIconW(null_mut(), 32512usize as *const u16)) };
     (!icon.is_null()).then(|| Arc::new(Icon(icon as usize)))
 }
-type Request = (u64, Vec<PathBuf>);
+type Request = (u64, Vec<LaunchTarget>);
 struct Shared {
     latest: Mutex<Option<Request>>,
     wake: Condvar,
@@ -113,24 +114,20 @@ impl Worker {
                         }
                         next.take().unwrap()
                     };
-                    let (generation, paths) = request;
+                    let (generation, targets) = request;
                     if work.invalidate.swap(false, Ordering::AcqRel) {
                         if let Some(loader) = &mut loader {
                             loader.clear();
                         }
                     }
-                    let mut icons = Vec::with_capacity(paths.len());
-                    for path in paths {
+                    let mut icons = Vec::with_capacity(targets.len());
+                    for target in targets {
                         if work.stop.load(Ordering::Acquire)
                             || work.latest.lock().unwrap().is_some()
                         {
                             break;
                         }
-                        icons.push(if path.as_os_str().is_empty() {
-                            None
-                        } else {
-                            loader.as_mut().and_then(|loader| loader.load(&path))
-                        });
+                        icons.push(loader.as_mut().and_then(|loader| loader.load(&target)));
                     }
                     let result = Completed {
                         generation,
@@ -171,7 +168,7 @@ impl Drop for Worker {
 }
 pub struct Session {
     hwnd: Hwnd,
-    paths: RefCell<Vec<PathBuf>>,
+    targets: RefCell<Vec<LaunchTarget>>,
     worker: RefCell<Option<Worker>>,
     pub requested: Cell<u64>,
     pub completed: Cell<u64>,
@@ -181,7 +178,7 @@ impl Session {
     pub fn new(hwnd: Hwnd) -> Self {
         Self {
             hwnd,
-            paths: RefCell::new(Vec::new()),
+            targets: RefCell::new(Vec::new()),
             worker: RefCell::new(None),
             requested: Cell::new(0),
             completed: Cell::new(0),
@@ -191,15 +188,15 @@ impl Session {
     pub fn started(&self) -> bool {
         self.worker.borrow().is_some()
     }
-    pub fn request(&self, paths: Vec<PathBuf>) -> io::Result<bool> {
+    pub fn request(&self, targets: Vec<LaunchTarget>) -> io::Result<bool> {
         let invalidating = self
             .worker
             .borrow()
             .as_ref()
             .is_some_and(|w| w.shared.invalidate.load(Ordering::Acquire));
-        if paths == *self.paths.borrow()
+        if targets == *self.targets.borrow()
             && !invalidating
-            && (self.requested.get() != 0 || paths.is_empty())
+            && (self.requested.get() != 0 || targets.is_empty())
         {
             return Ok(false);
         }
@@ -207,16 +204,16 @@ impl Session {
         if worker.is_none() {
             *worker = Some(Worker::new(self.hwnd)?);
         }
-        *self.paths.borrow_mut() = paths.clone();
+        *self.targets.borrow_mut() = targets.clone();
         let worker = worker.as_ref().unwrap();
         let generation = self.requested.get() + 1;
         self.requested.set(generation);
-        *worker.shared.latest.lock().unwrap() = Some((generation, paths));
+        *worker.shared.latest.lock().unwrap() = Some((generation, targets));
         worker.shared.wake.notify_one();
         Ok(true)
     }
     pub fn invalidate(&self) {
-        self.paths.borrow_mut().clear();
+        self.targets.borrow_mut().clear();
         self.requested.set(self.requested.get() + 1);
         if let Some(worker) = self.worker.borrow().as_ref() {
             worker.shared.invalidate.store(true, Ordering::Release);

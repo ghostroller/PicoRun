@@ -167,22 +167,20 @@ fn request_icons() {
     .flatten() else {
         return;
     };
-    let paths = state(|s| {
+    let targets = state(|s| {
         s.controller
             .results()
             .iter()
             .map(|hit| {
-                match &s.controller.catalog().entries()[hit.entry_index].target {
-                    crate::model::LaunchTarget::ShellPath(path) => path.clone(),
-                    // Packaged apps use the existing generic icon; no package image cache.
-                    _ => PathBuf::new(),
-                }
+                s.controller.catalog().entries()[hit.entry_index]
+                    .target
+                    .clone()
             })
             .collect()
     })
     .unwrap_or_default();
     let _ = view();
-    match session.request(paths) {
+    match session.request(targets) {
         Ok(true) => {
             let previous = state(|s| {
                 std::mem::replace(&mut s.view.icons, vec![None; s.view.rows.len()].into())

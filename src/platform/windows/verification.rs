@@ -558,6 +558,10 @@ pub fn run() -> io::Result<()> {
         }
         return result;
     }
+    if args.first().is_some_and(|a| a == "--packaged-icons") {
+        super::window::enable_dpi(); // Capture physical pixels rather than a virtualized client size.
+        return packaged_probe::run_icons(args.iter().any(|a| a == "--reference"));
+    }
     if args.first().is_some_and(|a| a == "--packaged") {
         return packaged_probe::run(args.iter().any(|a| a == "--reference"));
     }

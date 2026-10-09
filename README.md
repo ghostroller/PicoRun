@@ -66,7 +66,7 @@ UI language and English input are independent settings. Changing the interface l
 By default, PicoRun looks for apps in your user and shared **Start menu Programs** folders and **Desktop** folders, plus installed packaged apps for the current user through Windows **AppsFolder**. It refreshes this list at startup or when you press **F5**; there is no background polling.
 
 - **An app is missing:** press F5 after installing it. For a desktop app without a discoverable shortcut, add a shortcut pointing to its `.exe` to the Start menu or Desktop. Documents, folders, and web shortcuts are excluded.
-- **A Store app has a different name:** packaged apps use the localized name supplied by Windows. Try that name or its pinyin; opening uses the app's Windows activation ID (AUMID). With app icons enabled, these entries currently display a generic icon.
+- **A Store app has a different name:** packaged apps use the localized name supplied by Windows. Try that name or its pinyin; opening uses the app's Windows activation ID (AUMID). With app icons enabled, PicoRun loads their icons from Windows AppsFolder.
 - **Using `--source`:** custom folders replace all default sources, including packaged apps. Omit this option to include installed Store apps.
 - **An app was installed or removed:** press F5 or restart PicoRun to update the list.
 - **Similar names appear more than once:** shortcuts with different launch settings may be kept separately. PicoRun preserves their arguments and working directories when opening them.

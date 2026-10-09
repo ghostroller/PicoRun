@@ -1,6 +1,6 @@
 # 首个可用版本
 
-2026-10-09 商店应用发现：默认来源新增通过 AppsFolder 枚举当前用户已安装的打包应用，使用 Windows 本地化名称建立名称/拼音索引，并通过 AUMID 激活；仅启动/F5 刷新，不引入依赖或后台轮询。显式 `--source` 仍只扫描指定目录，不纳入打包应用；图标开启时这类入口暂用通用图标。本机 Windows 10 Pro 22H2（19045）x64 的三轮原生窗口探针均找到 ChatGPT 和 Microsoft Store，共 22 个打包应用、330 个索引入口；这项功能验证不代表完整 Windows 10、低配实机或 32 位/ARM64 兼容性。实现与验证边界见 [STORE_APPS_RESULTS.md](STORE_APPS_RESULTS.md)。下文 2026-10-03 的 Store/UWP 未完成说明保留为当时的历史范围。
+2026-10-09 商店应用发现：默认来源新增通过 AppsFolder 枚举当前用户已安装的打包应用，使用 Windows 本地化名称建立名称/拼音索引，并通过 AUMID 激活；仅启动/F5 刷新，不引入依赖或后台轮询。显式 `--source` 仍只扫描指定目录，不纳入打包应用；后续图标修复通过 AppsFolder 在原 STA 线程提取可见入口图标，与普通应用共用 48 条缓存；见 [STORE_ICONS_RESULTS.md](STORE_ICONS_RESULTS.md)。本机 Windows 10 Pro 22H2（19045）x64 的三轮原生窗口探针均找到 ChatGPT 和 Microsoft Store，共 22 个打包应用、330 个索引入口；这项功能验证不代表完整 Windows 10、低配实机或 32 位/ARM64 兼容性。实现与验证边界见 [STORE_APPS_RESULTS.md](STORE_APPS_RESULTS.md)。下文 2026-10-03 的 Store/UWP 未完成说明保留为当时的历史范围。
 
 2026-10-05 审查修复：修正图标线程停止的丢失唤醒、离线已知来源回补和 Unicode 路径误合并；第二实例通过就绪事件等待初始化完成，并转交前台权限。安装器支持正常 UNC 路径的自启动归属清理，包装验证失败时回收自身测试进程。修复、受控回归和验证边界见 [REVIEW_FIXES_RESULTS.md](REVIEW_FIXES_RESULTS.md)。Windows 10 和低配实机测试按用户要求暂缓。
 

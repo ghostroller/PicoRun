@@ -1,5 +1,7 @@
 # 商店应用发现与搜索修复
 
+后续 Store 图标修复和完整进程成本见 [STORE_ICONS_RESULTS.md](STORE_ICONS_RESULTS.md)。本文原记录的通用图标说明有误：本版实际把 AUMID 转为空路径，线程返回 None，显示为空白；现已修正。
+
 2026-10-09：安装版只扫描开始菜单 Programs 和桌面的 `.lnk` / `.exe`，没有读取 Windows AppsFolder；模型虽有 AUMID 类型，扫描、缓存和打开均未接通。原安装版三轮均找不到用户报告的 ChatGPT 与 Microsoft Store。修复版三轮真实窗口均找到两者，启动扫描和手动刷新均通过，总入口从 308 增至 330，其中 22 项为打包应用。
 
 ## 实现与边界

@@ -1,5 +1,6 @@
 //! Worker-local metadata and icon caches. Only visible requests cause file access.
-use super::{generic, Icon, CAPACITY};
+use super::{generic, packaged, Icon, CAPACITY};
+use crate::model::LaunchTarget;
 use std::{
     cell::Cell,
     collections::VecDeque,
@@ -36,7 +37,7 @@ pub struct Stats {
 
 #[derive(PartialEq, Eq)]
 struct Key {
-    path: PathBuf,
+    target: LaunchTarget,
     index: i32,
 }
 struct Resource {
@@ -45,22 +46,22 @@ struct Resource {
 }
 impl Resource {
     fn bytes(&self) -> usize {
-        size_of::<Self>() + 2 * size_of::<usize>() + self.key.path.capacity()
+        size_of::<Self>() + 2 * size_of::<usize>() + target_bytes(&self.key.target)
     }
 }
 struct Entry {
-    path: PathBuf,
+    target: LaunchTarget,
     resource: Option<Rc<Resource>>,
 }
 impl Entry {
     fn owned_bytes(&self) -> usize {
-        self.path.capacity() + self.resource.as_ref().map_or(0, |r| r.bytes())
+        target_bytes(&self.target) + self.resource.as_ref().map_or(0, |r| r.bytes())
     }
 }
 
 pub struct Loader {
     entries: VecDeque<Entry>,
-    // Fixed extraction size: all handles are ExtractIconExW large icons. Renderer is unchanged.
+    // File resources and AppsFolder share one large-icon cache and the existing renderer.
     icons: Vec<(Rc<Resource>, Arc<Icon>)>,
     generic: Option<Arc<Icon>>,
     generic_attempted: bool,
@@ -98,12 +99,12 @@ impl Loader {
             }
         }
     }
-    fn store(&mut self, path: &Path, resource: Option<Rc<Resource>>) {
+    fn store(&mut self, target: &LaunchTarget, resource: Option<Rc<Resource>>) {
         if self.entries.len() == MAX_ENTRIES {
             self.entries.pop_front();
         }
         self.entries.push_back(Entry {
-            path: path.to_path_buf(),
+            target: target.clone(),
             resource,
         });
         self.trim();
@@ -134,10 +135,10 @@ impl Loader {
         }
         self.generic.clone()
     }
-    pub fn load(&mut self, path: &Path) -> Option<Arc<Icon>> {
+    pub fn load(&mut self, target: &LaunchTarget) -> Option<Arc<Icon>> {
         let started = Instant::now();
         let (resource, metadata_hit) =
-            if let Some(index) = self.entries.iter().position(|e| e.path == path) {
+            if let Some(index) = self.entries.iter().position(|e| e.target == *target) {
                 self.counters.metadata_hits += 1;
                 let entry = self.entries.remove(index).unwrap();
                 let resource = entry.resource.clone();
@@ -145,9 +146,9 @@ impl Loader {
                 (resource, true)
             } else {
                 self.counters.parses += 1;
-                let key = resolve(path, &mut self.resource_buffer, &mut self.expanded_buffer);
+                let key = resolve(target, &mut self.resource_buffer, &mut self.expanded_buffer);
                 let resource = key.map(|key| self.intern(key));
-                self.store(path, resource.clone());
+                self.store(target, resource.clone());
                 (resource, false)
             };
         let Some(resource) = resource else {
@@ -210,7 +211,25 @@ impl Loader {
     }
 }
 
-fn resolve(path: &Path, resource: &mut [u16], expanded: &mut [u16]) -> Option<Key> {
+fn target_bytes(target: &LaunchTarget) -> usize {
+    match target {
+        LaunchTarget::ShellPath(path) => path.capacity(),
+        LaunchTarget::AppUserModelId(id) => id.capacity(),
+    }
+}
+fn resolve(target: &LaunchTarget, resource: &mut [u16], expanded: &mut [u16]) -> Option<Key> {
+    match target {
+        LaunchTarget::ShellPath(path) if !path.as_os_str().is_empty() => {
+            resolve_file(path, resource, expanded)
+        }
+        LaunchTarget::AppUserModelId(id) if packaged::valid_id(id) => Some(Key {
+            target: target.clone(),
+            index: 0,
+        }),
+        _ => None,
+    }
+}
+fn resolve_file(path: &Path, resource: &mut [u16], expanded: &mut [u16]) -> Option<Key> {
     let path_text = super::wide(path);
     if path_text.len() > resource.len() {
         return None;
@@ -280,12 +299,17 @@ fn resolve(path: &Path, resource: &mut [u16], expanded: &mut [u16]) -> Option<Ke
         return None;
     }
     Some(Key {
-        path: PathBuf::from(OsString::from_wide(&expanded[..length as usize - 1])),
+        target: LaunchTarget::ShellPath(PathBuf::from(OsString::from_wide(
+            &expanded[..length as usize - 1],
+        ))),
         index,
     })
 }
 fn extract(key: &Key) -> Option<Arc<Icon>> {
-    let path = super::wide(&key.path);
+    let path = match &key.target {
+        LaunchTarget::ShellPath(path) => super::wide(path),
+        LaunchTarget::AppUserModelId(id) => return packaged::extract(id),
+    };
     let mut icon = null_mut();
     // Owned HICON is released by Icon::drop after worker cache and UI snapshots let it go.
     let count =
@@ -303,9 +327,12 @@ fn extract(key: &Key) -> Option<Arc<Icon>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    fn file(path: &str) -> LaunchTarget {
+        LaunchTarget::ShellPath(PathBuf::from(path))
+    }
     fn key(index: i32) -> Key {
         Key {
-            path: PathBuf::from("synthetic-resource.dll"),
+            target: LaunchTarget::ShellPath(PathBuf::from("synthetic-resource.dll")),
             index,
         }
     }
@@ -314,7 +341,7 @@ mod tests {
         let mut loader = Loader::new();
         let first = loader.intern(key(-154));
         first.absent.set(true);
-        loader.store(Path::new("first.lnk"), Some(first.clone()));
+        loader.store(&file("first.lnk"), Some(first.clone()));
         let alias = loader.intern(key(-154));
         assert!(Rc::ptr_eq(&first, &alias));
         assert!(alias.absent.get());
@@ -330,10 +357,10 @@ mod tests {
         let mut loader = Loader::new();
         let absent = loader.intern(key(0));
         absent.absent.set(true);
-        loader.store(Path::new("absent.lnk"), Some(absent));
-        let first = loader.load(Path::new("absent.lnk")).unwrap();
+        loader.store(&file("absent.lnk"), Some(absent));
+        let first = loader.load(&file("absent.lnk")).unwrap();
         for _ in 0..100 {
-            let next = loader.load(Path::new("absent.lnk")).unwrap();
+            let next = loader.load(&file("absent.lnk")).unwrap();
             assert!(Arc::ptr_eq(&first, &next));
         }
         assert_eq!(loader.stats().extracts, 0);
@@ -341,17 +368,56 @@ mod tests {
         assert_eq!(loader.stats().generic_copies, 1);
     }
     #[test]
+    fn packaged_failures_share_cache_but_never_alias_files_or_other_aumids() {
+        let target = LaunchTarget::AppUserModelId("Synthetic.Family!App".into());
+        let mut loader = Loader::new();
+        let resource = resolve(&target, &mut [], &mut []).unwrap();
+        let resource = loader.intern(resource);
+        resource.absent.set(true);
+        loader.store(&target, Some(resource.clone()));
+        let fallback = loader.load(&target).unwrap();
+        for _ in 0..100 {
+            assert!(Arc::ptr_eq(&fallback, &loader.load(&target).unwrap()));
+        }
+        assert_eq!(loader.stats().extracts, 0);
+        assert_eq!(loader.stats().parses, 0);
+        assert_eq!(loader.stats().metadata_hits, 101);
+        assert_eq!(loader.stats().generic_copies, 1);
+        assert!(Rc::ptr_eq(
+            &resource,
+            &loader.intern(Key {
+                target: target.clone(),
+                index: 0
+            })
+        ));
+        for different in [
+            file("Synthetic.Family!App"),
+            LaunchTarget::AppUserModelId("Synthetic.Family!Other".into()),
+        ] {
+            assert!(!loader
+                .intern(Key {
+                    target: different,
+                    index: 0
+                })
+                .absent
+                .get());
+        }
+        loader.clear();
+        assert!(!loader.intern(Key { target, index: 0 }).absent.get());
+    }
+    #[test]
     fn metadata_has_count_and_byte_bounds() {
         let mut loader = Loader::new();
         for index in 0..2000 {
-            let path = PathBuf::from(format!("{}-{index}.lnk", "x".repeat(300)));
+            let path =
+                LaunchTarget::ShellPath(PathBuf::from(format!("{}-{index}.lnk", "x".repeat(300))));
             loader.store(&path, None);
             assert!(loader.stats().metadata_entries <= MAX_ENTRIES);
             assert!(loader.stats().metadata_bytes <= BYTE_BUDGET);
         }
-        let enormous = PathBuf::from("y".repeat(BYTE_BUDGET + 1));
+        let enormous = LaunchTarget::AppUserModelId("y".repeat(BYTE_BUDGET + 1));
         loader.store(&enormous, None);
         assert!(loader.stats().metadata_bytes <= BYTE_BUDGET);
-        assert!(!loader.entries.iter().any(|e| e.path == enormous));
+        assert!(!loader.entries.iter().any(|e| e.target == enormous));
     }
 }
